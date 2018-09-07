@@ -1,5 +1,5 @@
   TITLE "Source for CANLED64"
-; file name CANLED64_v2g.asm  19/08/12
+; file name CANLED64_v2hBeta1.asm 12/07/14 (RH)
 
 ; version a - the first development version
 ; version b - add bootloader code
@@ -37,6 +37,8 @@
 ;Rev v2f    Change parameters to new format
 ;Rev v2g    Added self enum as separate sub routine. Added OpCodes 0x5D and 0x75
 ;       Changes to button pressing
+;Rev v2h    Add new parameter structure and code to read PIC type
+;       Go straight to main2 after teaching an event
 
 ;node number release frame <0x51><NN hi><NN lo>
 ;keep alive frame  <0x52><NN hi><NN lo>
@@ -131,7 +133,7 @@
   LIST P=18F2480, r=hex, N=75, C=120,T=ON
   
   include   "p18f2480.inc"
-  include   "cbuslib/constants.inc"
+  include   "cbuslib/cbusdefs.inc"
   
 ; definitions used by bootloader
 
@@ -220,13 +222,14 @@ Modstat equ 1   ;address in EEPROM
 
 MAN_NO      equ MANU_MERG    ;manufacturer number
 MAJOR_VER   equ 2
-MINOR_VER   equ "G"
+MINOR_VER   equ "H"
 MODULE_ID   equ MTYP_CANLED64 ; id to identify this type of module
 EVT_NUM     equ EN_NUM           ; Number of events
 EVperEVT    equ EV_NUM           ; Event variables per event
 NV_NUM      equ 0          ; Number of node variables
 NODEFLGS    equ PF_CONSUMER + PF_BOOT
 CPU_TYPE    equ P18F2480
+BETA    equ 1
 
 
 
@@ -1139,6 +1142,7 @@ nodeprm     db  MAN_NO, MINOR_VER, MODULE_ID, EVT_NUM, EVperEVT, NV_NUM
       db  MAJOR_VER,NODEFLGS,CPU_TYPE,PB_CAN    ; Main parameters
             dw  RESET_VECT     ; Load address for module code above bootloader
             dw  0           ; Top 2 bytes of 32 bit address not used
+            db  0,0,0,0,CPUM_MICROCHIP,BETA
 sparprm     fill 0,prmcnt-$ ; Unused parameter space set to zero
 
 PRMCOUNT    equ sparprm-nodeprm ; Number of parameter bytes implemented
@@ -1150,7 +1154,7 @@ nodenam     dw  myName      ; Pointer to module type name
             dw  0 ; Top 2 bytes of 32 bit address not used
 
 
-PRCKSUM     equ MAN_NO+MINOR_VER+MODULE_ID+EVT_NUM+EVperEVT+NV_NUM+MAJOR_VER+NODEFLGS+CPU_TYPE+PB_CAN+HIGH myName+LOW myName+HIGH loadadr+LOW loadadr+PRMCOUNT
+PRCKSUM     equ MAN_NO+MINOR_VER+MODULE_ID+EVT_NUM+EVperEVT+NV_NUM+MAJOR_VER+NODEFLGS+CPU_TYPE+PB_CAN+HIGH myName+LOW myName+HIGH loadadr+LOW loadadr+PRMCOUNT+CPUM_MICROCHIP+BETA
 
 cksum       dw  PRCKSUM     ; Checksum of parameters
   
@@ -2067,7 +2071,8 @@ do_lrn1
     movlw 4
     goto  errmsg2     
 lrnend  
-    goto  do_it
+;   goto  do_it     ; to prevent LEDs changing...
+    goto  main2     ; ... j to main2
     
 do_unlearn
     call  unlearn
@@ -3555,7 +3560,21 @@ para1rd movf  Rx0d3,w
     call  getflags
     movwf Tx1d4
     bra   addflags
-notFlags    
+notFlags  
+    movlw .14
+    cpfseq  Temp
+    bra   nxtparam
+    call  getId1
+    movwf Tx1d4
+    bra   addflags
+nxtparam
+    movlw .15
+    cpfseq  Temp
+    bra   paramrd
+    call  getId2
+    movwf Tx1d4
+    bra   addflags
+paramrd
     movlw LOW nodeprm
     movwf TBLPTRL
     movlw HIGH nodeprm
@@ -3616,7 +3635,35 @@ whoami
     movwf Dlc
     call  sendTX
     return
-    
+
+;***********************************************************
+;
+;getDevId returnd DEVID2 and DEVID1 in PRODH and PRODL
+
+getId1
+  call  getProdId
+  movf  PRODL,w
+  return
+  
+getId2
+  call  getProdId
+  movf  PRODH,w
+  return
+
+getProdId
+
+  movlw 0x3F
+  movwf TBLPTRU
+  movlw 0xFF
+  movwf TBLPTRH
+  movlw 0xFE
+  movwf TBLPTRL
+  bsf   EECON1, EEPGD
+  tblrd*+
+  movff TABLAT, PRODL
+  tblrd*
+  movff TABLAT, PRODH
+  return    
 
 ;***********************************************************
 
