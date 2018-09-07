@@ -1,5 +1,5 @@
   TITLE "Source for CANLED64"
-; file name CANLED64_p.asm
+; file name CANLED64_v2f.asm  18/05//12
 
 ; version a - the first development version
 ; version b - add bootloader code
@@ -20,6 +20,21 @@
 ; version n - 19/03/11 stop LEDs flickering after read Events
 ; version p - 27/04/11 add flags to event variables
 ;       07/05/11 remove all test code
+
+;Rev 102a   First version wrt CBUS Developers Guide
+;     Add code to support 0x11 (RQMN)
+;     Add code to return 8th parameter by index - Flags
+
+;Rev 102b Ignore extended frames in packet receive routine
+;Rev 102c Remove 102b fix
+
+;Rev v2a    First release build, version 2
+;Rev v2b    Correct error in do_rdev1 and send error code
+;       if EV index is invalid
+;Rev v2c    Change reply to QNN to OPC_PNN
+;Rev v2d    Add check for zero index on read params and correct error code
+;Rev v2e    Add more checks for valid EN and EV indices in evsend, correct error code
+;Rev v2f    Change parameters to new format
 
 ;node number release frame <0x51><NN hi><NN lo>
 ;keep alive frame  <0x52><NN hi><NN lo>
@@ -114,6 +129,7 @@
   LIST P=18F2480, r=hex, N=75, C=120,T=ON
   
   include   "p18f2480.inc"
+  include   "cbuslib/constants.inc"
   
 ; definitions used by bootloader
 
@@ -184,23 +200,41 @@ CMD_REQ   equ 0x92
 SCMD_ON   equ 0x98  ;short on event
 SCMD_OFF  equ 0x99  ;short off event
 SCMD_REQ  equ 0x9A
+OPC_PNN   equ 0xB6  ; reply to QNN
+
 EN_NUM  equ .255  ;number of allowed events
 
 EV_NUM  equ .17   ;number of allowed EVs per event
 NV_NUM  equ 0   ;number of allowed NVs for node (provisional)
 LED64_ID equ 7    ; id for CANLED64
 
+CONSUMER  equ 1
+PRODUCER  equ 2
+COMBI   equ 3
+
+RQNN  equ 0xbc  ; response to OPC_QNN - provisional
+
 Modstat equ 1   ;address in EEPROM
+
+MAN_NO      equ MANU_MERG    ;manufacturer number
+MAJOR_VER   equ 2
+MINOR_VER   equ "F"
+MODULE_ID   equ MTYP_CANLED64 ; id to identify this type of module
+EVT_NUM     equ EN_NUM           ; Number of events
+EVperEVT    equ EV_NUM           ; Event variables per event
+NV_NUM      equ 0          ; Number of node variables
+NODEFLGS    equ PF_CONSUMER + PF_BOOT
+CPU_TYPE    equ P18F2480
 
 ;module parameters  change as required
 
-Para1 equ .165  ;manufacturer number
-Para2 equ  "P"  ;for now
-Para3 equ LED64_ID
-Para4 equ EN_NUM    ;node descriptors (temp values)
-Para5 equ EV_NUM
-Para6 equ 0
-Para7 equ 0
+;Para1  equ .165  ;manufacturer number
+;Para2  equ  "E"  ;for now
+;Para3  equ LED64_ID
+;Para4  equ EN_NUM    ;node descriptors (temp values)
+;Para5  equ EV_NUM
+;Para6  equ 0
+;Para7  equ .2
 
 
 ; set config registers
@@ -1090,26 +1124,46 @@ _CANSendBoot
 ;   End of bootloader 
   
   org RESET_VECT
+loadadr
   nop
-#ifdef  TESTMODE
-  goto  setupex
-#else
   goto  setup
-#endif
+
   
 
   org 0x0808
   goto hpint
   
   org 0810h
-node_ID db Para1, Para2, Para3, Para4, Para5, Para6, Para7
+myName  db  "LED64  "
   
   org 0x0818
   goto lpint
   
+    ORG   0820h
+
+nodeprm     db  MAN_NO, MINOR_VER, MODULE_ID, EVT_NUM, EVperEVT, NV_NUM 
+      db  MAJOR_VER,NODEFLGS,CPU_TYPE,PB_CAN    ; Main parameters
+            dw  RESET_VECT     ; Load address for module code above bootloader
+            dw  0           ; Top 2 bytes of 32 bit address not used
+sparprm     fill 0,prmcnt-$ ; Unused parameter space set to zero
+
+PRMCOUNT    equ sparprm-nodeprm ; Number of parameter bytes implemented
+
+             ORG 0838h
+
+prmcnt      dw  PRMCOUNT    ; Number of parameters implemented
+nodenam     dw  myName      ; Pointer to module type name
+            dw  0 ; Top 2 bytes of 32 bit address not used
+
+
+PRCKSUM     equ MAN_NO+MINOR_VER+MODULE_ID+EVT_NUM+EVperEVT+NV_NUM+MAJOR_VER+NODEFLGS+CPU_TYPE+PB_CAN+HIGH myName+LOW myName+HIGH loadadr+LOW loadadr+PRMCOUNT
+
+cksum       dw  PRCKSUM     ; Checksum of parameters
+  
+  
 ;*******************************************************************
 
-    ORG   0820h     ;start of program
+    ORG   0840h     ;start of program
 ; 
 ;
 ;   high priority interrupt. Used for CAN receive and transmit error.
@@ -1193,6 +1247,7 @@ load  movf  POSTINC1,W
 ;   bra   setmode 
     movf  Rx0dlc,F
     bz    back      ;ignore zero length frames
+;   btfss Rx0sidl,3   ;ignore extended frames
     bsf   Datmode,0   ;valid message frame  
     
 back  bcf   RXB0CON,RXFUL ;ready for next
@@ -1594,7 +1649,20 @@ params              ; 0x10 read parameters in setup mode
     bra   main2
     call  parasend
     bra   main2
+
+name
+    btfss Datmode,2   ;only in setup mode
+    bra   main2
+    call  namesend
+    bra   main2
     
+doQnn
+    movf  NN_temph,w    ;respond if NN is not zero
+    addwf NN_templ,w
+    btfss STATUS,Z
+    call  whoami
+    bra   main2
+        
 short
     clrf  Rx0d1
     clrf  Rx0d2
@@ -1642,10 +1710,15 @@ packet  movlw CMD_ON  ;only ON and OFF events supported
     movlw 0x42      ;set NN on 0x42
     subwf Rx0d0,W
     bz    setNN
+    movlw 0x0d      ; QNN
+    subwf Rx0d0,w
+    bz    doQnn
     movlw 0x10      
     subwf Rx0d0,W
-    bz    params      ; read node parameters
-    
+    bz    params      ;read node parameters
+    movlw 0x11
+    subwf Rx0d0,w
+    bz    name      ;read module name   
     movlw 0x53      ; set to learn mode on 0x53
     subwf Rx0d0,W
     bz    setlrn    
@@ -1965,13 +2038,16 @@ do_rdev
     tstfsz  EVidx
     bra   do_rdev1
 rdeverr
-    clrf  EVdata
-    clrf  EVidx
-    call  endrdev
+;   clrf  EVdata
+;   clrf  EVidx
+;   call  endrdev
+    movlw 6
+    call  errsub
     goto  main2
+    
 do_rdev1
     decf  EVidx     ; index starts at zero
-    movlw .16
+    movlw EV_NUM
     cpfslt  EVidx
     bra   rdeverr
     call  readev
@@ -3355,17 +3431,28 @@ evns2 movlw LOW ENCount
 ;   send EVs by reference to EN index
 
 evsend
+    movlw LOW ENCount ; no of events set
+    movwf EEADR
+    call  eeread
+    sublw 0
+    bz    noens1    ;no events set
+    
     movf  ENidx,w   ; index starts at 1
-    bz    notEN
-    decf  ENidx
-    movf  EVidx,w   ; index starts at 1
-    bz    notEN
-    decf  EVidx
+    bz    noens1
+    
+    decf  ENidx   ; make zero based for lookup
     movlw LOW ENCount
     movwf EEADR
     call  eeread    ; read no of events
-    cpfslt  ENidx
-    bra   notEN
+    cpfslt  ENidx   ; required index is in range
+    bra   noens1
+
+    movf  EVidx,w   ; index starts at 1
+    bz    notEV
+    decf  EVidx
+    movlw EV_NUM
+    cpfslt  EVidx   ; skip if in range
+    bra   notEV
     
     call  findEN
     
@@ -3384,7 +3471,7 @@ evsend
     call  sendTX
     return
 
-notEN movlw 8   ;invalid EN#
+notEV movlw 6   ;invalid EV index
     call  errsub
     return
     
@@ -3395,7 +3482,7 @@ notEN movlw 8   ;invalid EN#
 parasend  
     movlw 0xEF
     movwf Tx1d0
-    movlw LOW node_ID
+    movlw LOW nodeprm
     movwf TBLPTRL
     movlw 8
     movwf TBLPTRH   ;relocated code
@@ -3414,27 +3501,117 @@ para1 tblrd*+
     call  sendTXa
     return
 
+;**************************************************************************
+;   send module name - 7 bytes
+
+namesend  
+    movlw 0xE2
+    movwf Tx1d0
+    movlw LOW myName
+    movwf TBLPTRL
+    movlw HIGH myName
+    movwf TBLPTRH   ;relocated code
+    lfsr  FSR0,Tx1d1
+    movlw 7
+    movwf Count
+    bsf   EECON1,EEPGD
+    
+name1 tblrd*+
+    movff TABLAT,POSTINC0
+    decfsz  Count
+    bra   name1
+    bcf   EECON1,EEPGD  
+    movlw 8
+    movwf Dlc
+    call  sendTXa
+    return
+    
+
+
 ;**********************************************************
 
 ;   send individual parameter
 
-para1rd movlw 0x9B
+;   Index 0 sends no of parameters
+
+para1rd movf  Rx0d3,w
+    sublw 0
+    bz    numParams
+    movlw PRMCOUNT
+    movff Rx0d3, Temp
+    decf  Temp
+    cpfslt  Temp
+    bra   pidxerr
+    movlw 0x9B
     movwf Tx1d0
-    movlw LOW node_ID
+    movlw 7   ;FLAGS index in nodeprm
+    cpfseq  Temp
+    bra   notFlags      
+    call  getflags
+    movwf Tx1d4
+    bra   addflags
+notFlags    
+    movlw LOW nodeprm
     movwf TBLPTRL
-    movlw 8
+    movlw HIGH nodeprm
     movwf TBLPTRH   ;relocated code
+    clrf  TBLPTRU
     decf  Rx0d3,W
     addwf TBLPTRL
     bsf   EECON1,EEPGD
     tblrd*
     movff TABLAT,Tx1d4
-    bcf   EECON1,EEPGD
+addflags            
     movff Rx0d3,Tx1d3
     movlw 5
     movwf Dlc
     call  sendTX
     return  
+    
+numParams
+    movlw 0x9B
+    movwf Tx1d0
+    movlw PRMCOUNT
+    movwf Tx1d4
+    movff Rx0d3,Tx1d3
+    movlw 5
+    movwf Dlc
+    call  sendTX
+    return
+    
+pidxerr
+    movlw .10
+    call  errsub
+    return
+    
+getflags    ; create flags byte
+    movlw PF_CONSUMER
+    btfsc Mode,1
+    iorlw 4   ; set bit 2
+    movwf Temp
+    bsf   Temp,3    ;set bit 3, we are bootable
+    movf  Temp,w
+    return
+    
+;**********************************************************
+
+; returns Node Number, Manufacturer Id, Module Id and Flags
+
+whoami
+    call  ldely   ;wait for other nodes
+    movlw OPC_PNN
+    movwf Tx1d0
+    movlw MAN_NO    ;Manufacturer Id
+    movwf Tx1d3
+    movlw MODULE_ID   ; Module Id
+    movwf Tx1d4
+    call  getflags
+    movwf Tx1d5
+    movlw 6
+    movwf Dlc
+    call  sendTX
+    return
+    
 
 ;***********************************************************
 
