@@ -1,25 +1,15 @@
-    TITLE   "Source for CAN multiplexed LED driver using CBUS"
-; filename LED2_k.asm  15/02/10
-; a LED driver for 64 LEDs intended for control panels. Consumer node for SLiM/FLim with bootloader 
+  TITLE "Source for CANLED64"
+; file name LED64h.asm
 
-
-; CAN rate at 125000 for now
-
-;modified version of CANLED for using onboard FLASH for event storage.
-;working except for unlearn.
-;unlearn of events in flash working 15/01/08
-;unlearn of EVs in EEPROM working
-;clear all on reset if unlearn in. Working
-;added polarity change during learn. Working
-;added toggling of pairs with a single command.
-;event applies to the taught LED and the next one is opposite.
-;next one can still be controlled independently so care is needed.
-;minor corrections  26/01/08
-;Port corrections  31/01/08
-;Fix to CAN filters to reject extended frames  (rev c)
-;Fix to matrix clear. rev d  12/11/09
-
-;Now changed to LED2 for combined version  25/01/10
+; version a - the first development version
+; version b - add bootloader code
+; version c - incorporate code from LED2j.asm
+; version d - Slim mode appears to be working
+; version e - Flim seems reasonable, learn and read events OK
+; version f - delete event works OK, removes event leds from matrix
+;     - clearing all events (0x55) also clears the matrix
+; version g - make learn in Flim mode display updated leds
+; version h - fix bug in findEN
 
 ;node number release frame <0x51><NN hi><NN lo>
 ;keep alive frame  <0x52><NN hi><NN lo>
@@ -29,10 +19,12 @@
 ;read no. of events left <0x56><NN hi><NN lo>
 ;set event in learn mode  <0xD2><EN1><EN2><EN3><EN4><EVI><EV>  uses EV indexing
 ;The EV sent will overwrite the existing one
-;read event in learn mode <0xB2><EN1><EN2><EN3><EN4><EVI>
+;read event variable in learn mode <0xB2><EN1><EN2><EN3><EN4><EVI>
 ;unset event in learn mode <0x95><EN1><EN2><EN3><EN4>
 ;reply to 0xB2. <0xD3><EN1><EN2><EN3><EN4><EVI><EV>
 ;Also sent if attempt to read / write too many EVs. Returns with EVI = 0 in that case
+;read an event variable by index <0x9C><NN hi><NN lo><EN#><EV#>
+;reply to 0x9C <B5><NN hi><NN lo><EN#><EV#><EVval>
 ; 0x72 and 0xF2 response to read stored ENs by index. Response is F2
 ; 0x57 to read all events. Response is F2
 ; 0x73  to read individual parameters. Response is 9B
@@ -40,22 +32,6 @@
 
 ;read node parameters <0x10> Only works in setup mode. Sends string of 7 bytes as 
 ;<0xEF><para1><para2><para3><para4><para5><para6><para7>
-
-; mods for version e
-; fix read events routine, read from flash ram
-; add check in learnin for Flim mode
-; remove decrement of EV in mod_EVf
-; change version to "E"
-
-; mods to version f
-; change CAN enum reply to wait for TX2 buffer to be free
-; ignore zero length frames
-; change version to "F"
-; change in 'unset'
-; now rev G
-; prevent error messages in unset Rev h.  (17/03/10
-; Rev j. Has new enum scheme. 24/03/10
-; Rev k. Added clear of RXB overflow bits in COMSTAT
 
 ; This is the bootloader section
 
@@ -125,49 +101,10 @@
 
 
 
-; 
-; Assembly options
-  LIST  P=18F2480,r=hex,N=75,C=120,T=ON
-
+  LIST P=18F2480, r=hex, N=75, C=120,T=ON
+  
   include   "p18f2480.inc"
-
-;definitions
-
-S_PORT    equ PORTB ;setup switch  Change as needed
-S_BIT   equ 0
-LEARN     equ 0 ;setup jumper in port C
-POL     equ 4 ;setup jumper in port C
-UNLEARN   equ 1 ;setup jumper in port C
-TOG     equ 3 ;setup jumper in port C
-
-LED_PORT equ  PORTB  ;change as needed
-LED1  equ   7 ;PB7 is the green LED on the PCB
-LED2  equ   6 ;PB6 is the yellow LED on the PCB
-
-CMD_ON    equ 0x90  ;on event
-CMD_OFF   equ 0x91  ;off event
-CMD_REQ   equ 0x92
-SCMD_ON   equ 0x98  ;short on event
-SCMD_OFF  equ 0x99  ;short off event
-SCMD_REQ  equ 0x9A
-EN_NUM  equ .248  ;number of allowed events
-
-EV_NUM  equ 1   ;number of allowed EVs per event
-NV_NUM  equ 1   ;number of allowed NVs for node (provisional)
-LED2_ID equ 6
-
-Modstat equ 1   ;address in EEPROM
-
-;module parameters  change as required
-
-Para1 equ .165  ;manufacturer number
-Para2 equ  "K"  ;for now
-Para3 equ LED2_ID
-Para4 equ EN_NUM    ;node descriptors (temp values)
-Para5 equ EV_NUM
-Para6 equ 0
-Para7 equ 0
-
+  
 ; definitions used by bootloader
 
 #define MODE_SELF_VERIFY  ;Enable self verification of written data (undefine if not wanted)
@@ -196,6 +133,9 @@ Para7 equ 0
 #define CAN_CIOCON    B'00100000' ;CAN I/O control  
 
 ; ************************************************************ ** * * * * * * * * * * * * * * *
+
+;#define  TESTMODE
+
 #ifndef EEADRH    
 #define EEADRH  EEADR+ 1  
 #endif      
@@ -216,6 +156,42 @@ Para7 equ 0
 #define CMD_BOOT_TEST   0x04  
 
 
+;definitions
+
+S_PORT    equ PORTB ;setup switch  Change as needed
+S_BIT   equ 0
+LEARN     equ 0 ;setup jumper in port C
+POL     equ 4 ;setup jumper in port C
+UNLEARN   equ 1 ;setup jumper in port C
+TOG     equ 3 ;setup jumper in port C
+
+LED_PORT equ  PORTB  ;change as needed
+LED1  equ   7 ;PB7 is the green LED on the PCB
+LED2  equ   6 ;PB6 is the yellow LED on the PCB
+
+CMD_ON    equ 0x90  ;on event
+CMD_OFF   equ 0x91  ;off event
+CMD_REQ   equ 0x92
+SCMD_ON   equ 0x98  ;short on event
+SCMD_OFF  equ 0x99  ;short off event
+SCMD_REQ  equ 0x9A
+EN_NUM  equ .255  ;number of allowed events
+
+EV_NUM  equ .16   ;number of allowed EVs per event
+NV_NUM  equ 0   ;number of allowed NVs for node (provisional)
+LED64_ID equ 7    ; id for CANLED64
+
+Modstat equ 1   ;address in EEPROM
+
+;module parameters  change as required
+
+Para1 equ .165  ;manufacturer number
+Para2 equ  "H"  ;for now
+Para3 equ LED64_ID
+Para4 equ EN_NUM    ;node descriptors (temp values)
+Para5 equ EV_NUM
+Para6 equ 0
+Para7 equ 0
 
 
 ; set config registers
@@ -232,25 +208,7 @@ Para7 equ 0
   CONFIG  XINST = OFF,LVP = OFF,STVREN = ON,CP0 = OFF
   CONFIG  CP1 = OFF, CPB = OFF, CPD = OFF,WRT0 = OFF,WRT1 = OFF, WRTB = OFF
   CONFIG  WRTC = OFF,WRTD = OFF, EBTR0 = OFF, EBTR1 = OFF, EBTRB = OFF
-
-;original CONFIG settings left here for reference
   
-; __CONFIG  _CONFIG1H,  B'00100110' ;oscillator HS with PLL
-; __CONFIG  _CONFIG2L,  B'00001110' ;brown out voltage and PWT  
-; __CONFIG  _CONFIG2H,  B'00000000' ;watchdog time and enable (disabled for now)
-; __CONFIG  _CONFIG3H,  B'10000000' ;MCLR enable  
-; __CONFIG  _CONFIG4L,  B'10000001' ;B'10000001'  for   no debug
-; __CONFIG  _CONFIG5L,  B'00001111' ;code protection (off)  
-; __CONFIG  _CONFIG5H,  B'11000000' ;code protection (off)  
-; __CONFIG  _CONFIG6L,  B'00001111' ;write protection (off) 
-; __CONFIG  _CONFIG6H,  B'11100000' ;write protection (off) 
-; __CONFIG  _CONFIG7L,  B'00001111' ;table read protection (off)  
-; __CONFIG  _CONFIG7H,  B'01000000' ;boot block protection (off)
-
-
-
-; processor uses 4 MHz resonator but clock is 16 MHz.
-
 ;**************************************************************************
 ; RAM addresses used by boot. can also be used by application.
 
@@ -273,6 +231,7 @@ Para7 equ 0
   ; end of bootloader RAM
 
 
+  
 ;****************************************************************
 ; define RAM storage
   
@@ -292,26 +251,30 @@ Para7 equ 0
   Fsr_temp2H 
   TempCANCON
   TempCANSTAT
-  CanID_tmp ;temp for CAN Node ID
-  IDtemph   ;used in ID shuffle
+  CanID_tmp   ;temp for CAN Node ID
+  IDtemph     ;used in ID shuffle
   IDtempl
   NN_temph    ;node number in RAM
   NN_templ
-  ENtemp1   ;number of events
+  ENtemp1     ;number of events
+  TestTemp
   
-  IDcount   ;used in self allocation of CAN ID.
+  IDcount     ;used in self allocation of CAN ID.
   
-  Mode    ;for FLiM / SLiM etc
+  Mode      ;for FLiM / SLiM etc
   Datmode     ;flag for data waiting 
+  Testmode    ;flag for testing
   Count     ;counter for loading
   Count1
   Count2
   Count3
+  CountFb0  ; used when reading/writing fb data from/to flash
+  CountFb1  ;  ditto
   Lcount2   ;used in Lpint
   Lcount3
   Keepcnt   ;keep alive counter
   Latcount  ;latency counter
-  Dcount
+; Dcount
   Number      ;used to set matrix
   Numtemp
   Roll
@@ -320,18 +283,30 @@ Para7 equ 0
   Rowout      ;final row value
   Temp      ;temps
   Temp1
-  Flcount     ;flash memory counter
-  Flcount1    ;flash memory counter low
-  Flcounth    ;flash memory counter high
-  Blk_st      ;first block for unlearn
-  Blk_lst     ;last block for unlearn
-  Blk_num     ;number of blocks to shift up
+; Flcount     ;flash memory counter
+; Flcount1    ;flash memory counter low
+; Flcounth    ;flash memory counter high
+; Blk_st      ;first block for unlearn
+; Blk_lst     ;last block for unlearn
+; Blk_num     ;number of blocks to shift up
   
-  Intemp      ;used in input test
-  Intemp1
+; Intemp      ;used in input test
+; Intemp1
   Dlc       ;data length
-  NV_temp     ;storage of NV  (if needed
-
+; NV_temp     ;storage of NV  (if needed
+  
+  evaddrh     ; event data ptr
+  evaddrl
+  prevadrh    ; previous event data ptr
+  prevadrl
+  nextadrh    ; next event data ptr
+  nextadrl
+  htaddrh     ; current hash table ptr
+  htaddrl
+  htidx     ; index of current hash table entry in EEPROM
+  hnum      ; actual hash number
+  freadrh     ; current free chain address
+  freadrl
   
   Rx0con      ;start of receive packet 0
   Rx0sidh
@@ -363,41 +338,25 @@ Para7 equ 0
   Tx1d6
   Tx1d7
   
-  
-  Fhold     ;holding block for flash write
-  Fhold1
-  Fhold2
-  Fhold3
-  Fhold4
-  Fhold5
-  Fhold6
-  Fhold7
-  
-  
-  
-  
-  
-    
-  
-  Cmdtmp    ;command temp for number of bytes in frame jump table
+; Cmdtmp    ;command temp for number of bytes in frame jump table
   Match   ;match flag
   ENcount   ;which EN matched
   ENcount1  ;temp for count offset
-  ENend   ;last  EN number
-  ENtemp
-  ENtempl
-  ENtemph
+; ENend   ;last  EN number
+; ENtemp
+; ENtempl
+; ENtemph
   EVtemp    ;holds current EV
   EVtemp1
-  EVtemp2
+; EVtemp2
   
-  Mask
+  EVidx   ; EV index from learn cmd
+  EVdata    ; EV data from learn cmd
+  ENidx   ; event index from commands which access events by index
   
+; Mask
   
-  
-  Eadr    ;temp eeprom address
-  
-  
+; Eadr    ;temp eeprom address
   
   Matrix    ;8 bytes for scan array
   Matrix1
@@ -428,93 +387,113 @@ Para7 equ 0
   Enum13
   
   ;add variables to suit
-  
-  
-  ENDC
-    
-;*************************************************************
-  
+;data area to store data for event learning and event matching
 
+  ev0   ;event number from learn command and from received event
+  ev1
+  ev2
+  ev3
+  led0  ; led and polarity data for current event
+  led1
+  led2
+  led3
+  led4
+  led5
+  led6
+  led7
+  pol0
+  pol1
+  pol2
+  pol3
+  pol4
+  pol5
+  pol6
+  pol7
   
+  setevt  ; temp variable. holds next event number
+  
+  endc
 
-  
-    
 
+; data area for storing event data while flash is being updated 
+; Structure of each 32 bytes is as follows
+; Bytes 0-3 - the event number
+; Bytes 4-5 - the next event pointer
+; Bytes 6-7 - the previous event pointer
+; Bytes 8-15 - the led control bits
+; Bytes 16-23 - the polarity control bits
+; Bytes 24-31 - spare (unused)
+
+  CBLOCK 0x100  ; bank 1
+  ; first event data block
+  evt00
+  evt01
+  evt02
+  evt03
+  next0h
+  next0l
+  prev0h
+  prev0l
+  led00
+  led01
+  led02
+  led03
+  led04
+  led05
+  led06
+  led07
+  pol00
+  pol01
+  pol02
+  pol03
+  pol04
+  pol05
+  pol06
+  pol07
+  fb24
+  fb25
+  fb26
+  fb27
+  fb28
+  fb29
+  fb30
+  fb31
+  ; second event data block
+  evt10
+  evt11
+  evt12
+  evt13
+  next1h
+  next1l
+  prev1h
+  prev1l
+  led10
+  led11
+  led12
+  led13
+  led14
+  led15
+  led16
+  led17
+  pol10
+  pol11
+  pol12
+  pol13
+  pol14
+  pol15
+  pol16
+  pol17
+  fb56
+  fb57
+  fb58
+  fb59
+  fb60
+  fb61
+  fb62
+  fb63
   
-  CBLOCK  0x100   ;bank 1
-  Flash_buf
-  Fb1
-  Fb2
-  Fb3
-  Fb4
-  Fb5
-  Fb6
-  Fb7
-  Fb8
-  Fb9
-  Fb10
-  Fb11
-  Fb12
-  Fb13
-  Fb14
-  Fb15
-  Fb16
-  Fb17
-  Fb18
-  Fb19
-  Fb20
-  Fb21
-  Fb22
-  Fb23
-  Fb24
-  Fb25
-  Fb26
-  Fb27
-  Fb28
-  Fb29
-  Fb30
-  Fb31
-  Fb32
-  Fb33
-  Fb34
-  Fb35
-  Fb36
-  Fb37
-  Fb38
-  Fb39
-  Fb40
-  Fb41
-  Fb42
-  Fb43
-  Fb44
-  Fb45
-  Fb46
-  Fb47
-  Fb48
-  Fb49
-  Fb50
-  Fb51
-  Fb52
-  Fb53
-  Fb54
-  Fb55
-  Fb56
-  Fb57
-  Fb58
-  Fb59
-  Fb60
-  Fb61
-  Fb62
-  Fb63
-  Fb64
-  Fb65
-  Fb66
-  Fb67
-  Fb68
-  
-  ENDC
-  
-  
+  endc
+
 ;****************************************************************
 ; This is the bootloader
 ; ***************************************************************************** 
@@ -656,7 +635,7 @@ _CANInit:
   movwf ADCON1
   bcf TRISB,7
   bcf TRISB,6
-  bsf PORTB,7   ;green LED on
+  bcf PORTB,7   ;green LED off
   bsf PORTB,6   ;yellow LED on
 
 
@@ -1095,26 +1074,25 @@ _CANSendBoot
 ; Start the transmission
 
 ;   End of bootloader 
+  
+  org RESET_VECT
+  nop
+#ifdef  TESTMODE
+  goto  setupex
+#else
+  goto  setup
+#endif
+  
 
-;****************************************************************
-;
-;   start of program code
-
-    ORG   0800h
-    nop           ;for debug
-    goto  setup
-
-    ORG   0808h
-    goto  hpint     ;high priority interrupt
-
-    ORG   0810h     ;node type parameters
-node_ID db    Para1,Para2,Para3,Para4,Para5,Para6,Para7
-                ;change these 7 bytes as required
-
-    ORG   0818h 
-    goto  lpint     ;low priority interrupt
-
-
+  org 0x0808
+  goto hpint
+  
+  org 0810h
+node_ID db Para1, Para2, Para3, Para4, Para5, Para6, Para7
+  
+  org 0x0818
+  goto lpint
+  
 ;*******************************************************************
 
     ORG   0820h     ;start of program
@@ -1176,12 +1154,9 @@ errint  movlb .15         ;change bank
     andwf TXB1SIDH,F      ;change priority
 txagain bsf   TXB1CON,TXREQ   ;try again
           
-errbak    bcf   RXB1CON,RXFUL
-    movlb 0
+errbak  movlb 0
     bcf   RXB0CON,RXFUL   ;ready for next
-    
-    bcf   COMSTAT,RXB0OVFL  ;clear overflow flags if set
-    bcf   COMSTAT,RXB1OVFL    
+    bcf   RXB1CON,RXFUL 
     bra   back1
 
 access  movf  CANCON,W        ;switch buffers
@@ -1338,11 +1313,8 @@ lpend movff Fsr_temp2L,FSR2L
     movf  W_tempL,W
     movff St_tempL,STATUS 
     retfie  
-            
-
-            
-
-;*********************************************************************
+              
+;********************************************************************
 
 ;*********************************************************************
 
@@ -1381,6 +1353,7 @@ noflash btfsc S_PORT,S_BIT  ;setup button?
     movwf Count
     clrf  Count1
     clrf  Count2
+    
 wait  decfsz  Count2
     goto  wait
     btfss Datmode,2
@@ -1389,6 +1362,7 @@ wait  decfsz  Count2
     bra   wait2
     btg   PORTB,6     ;flash LED
     bcf   INTCON,TMR0IF
+    
 wait2 decfsz  Count1
     goto  wait
     btfsc S_PORT,S_BIT
@@ -1413,13 +1387,13 @@ wait2 decfsz  Count1
     call  nnrel
     clrf  NN_temph
     clrf  NN_templ
+    
 wait1 btfss S_PORT,S_BIT
     bra   wait1     ;wait till release
     call  ldely
     btfss S_PORT,S_BIT
     bra   wait1
   
-    
     movlw LOW NodeID      ;put NN back to 0000
     movwf EEADR
     movlw 0
@@ -1437,7 +1411,6 @@ wait1 btfss S_PORT,S_BIT
     bcf   Mode,1
     bcf   PORTB,6
     bsf   PORTB,7       ;green LED on
-  
     movlw B'11000000'
     movwf INTCON
     goto  main        ;setloop
@@ -1460,6 +1433,7 @@ main4 btfss Datmode,3
     bcf   Datmode,2
     bsf   PORTB,6     ;LED on
     bra   main3
+    
 set2  bsf   Datmode,2
     call  nnack
 
@@ -1489,65 +1463,78 @@ go_FLiM bsf   Datmode,1   ;FLiM setup mode
     bcf   PORTB,7     ;green off
     bra   wait1
     
-    
-
 ; common to FLiM and SLiM   
-  
   
 main1 
     btfsc Datmode,0   ;any new CAN frame received?
-
-    
     bra   packet      ;yes
-    bra   do        ;look for inputs
+    bra   main
 
 ;********************************************************************
 
 ;   These are here as branch was too long
 
-unset ;bsf    Datmode,5   ;unlearn this event
-    ;bra    go_on
+unset           ; 0x95 unlearn event in learn mode
     btfss Datmode,4
     bra   main2
-    bsf   Datmode,5
-    bra   learn1
+    call  copyev
+    bra   do_unlearn
     
-readEV  btfss Datmode,4
-    bra   main2     ;prevent error message
-    bsf   Datmode,6     ;read back an EV
-    bra   learn1
+readEV            ; 0xB2 read event variable in learn mode
+    btfss Datmode,4
+    bra   main2     ; prevent error message
+    call  copyev      ; copy ev data to safe buffer
+    bra   do_rdev     ; now do it
 
-
-evns1 call  thisNN        ;read event numbers
-    sublw 0
-    bnz   evns3
-    call  evns2
-    bra   main2
-evns3 goto  notNN
-
-reval call  thisNN        ;read event numbers
+evns            ; 0x58 read number of stored events
+    call  thisNN        
     sublw 0
     bnz   notNNx
+    call  evns2
+    bra   main2
+
+reval           ; 0x9C read event variable
+    call  thisNN    
+    sublw 0
+    bnz   notNNx
+    movff Rx0d3,ENidx ; event index
+    movff Rx0d4,EVidx ; event variable index
     call  evsend
     bra   main2
+    
 notNNx  goto  notNN
 
 go_on_x goto  go_on
 
-params  btfss Datmode,2   ;only in setup mode
+params              ; 0x10 read parameters in setup mode
+    btfss Datmode,2   
     bra   main2
     call  parasend
     bra   main2
     
-
-
-
+short
+    clrf  Rx0d1
+    clrf  Rx0d2
+    bra   go_on 
     
-  
+readENi             ; 0x72  read event by index
+    call  thisNN      
+    sublw 0
+    bnz   notNNx
+    movff Rx0d3, ENidx  ; copy requested index
+    call  enrdi
+    bra   main2
     
-  
-  
-                ;main packet handling is here
+copyev    ; copy event data to safe buffer
+    movff Rx0d1, ev0
+    movff Rx0d2, ev1
+    movff Rx0d3, ev2
+    movff Rx0d4, ev3
+    movff Rx0d5, EVidx    ; only used by learn and some read cmds
+    movff Rx0d6, EVdata   ; only used by learn cmd
+    return
+    
+    ;main packet handling is here
 
 packet  movlw CMD_ON  ;only ON, OFF and REQ events supported
     subwf Rx0d0,W 
@@ -1560,13 +1547,13 @@ packet  movlw CMD_ON  ;only ON, OFF and REQ events supported
     bz    go_on_x
     movlw SCMD_ON
     subwf Rx0d0,W
-    bz  short
+    bz    short
     movlw SCMD_OFF
     subwf Rx0d0,W
-    bz  short
+    bz    short
     movlw SCMD_REQ
     subwf Rx0d0,W
-    bz  short
+    bz    short
     movlw 0x5C      ;reboot
     subwf Rx0d0,W
     bz    reboot
@@ -1577,515 +1564,291 @@ packet  movlw CMD_ON  ;only ON, OFF and REQ events supported
     bz    setNN
     movlw 0x10      
     subwf Rx0d0,W
-    bz    params      ;read node parameters
+    bz    params      ; read node parameters
     
-    movlw 0x53      ;set to learn mode on 0x53
+    movlw 0x53      ; set to learn mode on 0x53
     subwf Rx0d0,W
     bz    setlrn    
-    movlw 0x54      ;clear learn mode on 0x54
+    movlw 0x54      ; clear learn mode on 0x54
     subwf Rx0d0,W
     bz    notlrn
-    movlw 0x55      ;clear all events on 0x55
+    movlw 0x55      ; clear all events on 0x55
     subwf Rx0d0,W
     bz    clrens
-    movlw 0x56      ;read number of events left
+    movlw 0x56      ; read number of events left
     subwf Rx0d0,W
     bz    rden
-    movlw 0xD2      ;is it set event?
+    movlw 0xD2      ; is it set event?
     subwf Rx0d0,W
-    bz    chklrn      ;do it
-    movlw 0x95      ;is it unset event
+    bz    chklrn      ; do it
+    movlw 0x95      ; is it unset event
     subwf Rx0d0,W     
     bz    unset
-    movlw 0xB2      ;read event variables
+    movlw 0xB2      ; read event variables
     subwf Rx0d0,W
     bz    readEV
     
-    movlw 0x57      ;is it read events
+    movlw 0x57      ; is it read events
     subwf Rx0d0,W
     bz    readEN
     movlw 0x72
     subwf Rx0d0,W
-    bz    readENi     ;read event by index
+    bz    readENi     ; read event by index
     movlw 0x73
     subwf Rx0d0,W
-    bz    para1a      ;read individual parameters
+    bz    para1a      ; read individual parameters
     movlw 0x58
     subwf Rx0d0,W
     bz    evns
-    movlw 0x9C        ;read event variables by EN#
+    movlw 0x9C      ; read event variables by EN#
     subwf Rx0d0,W
     bz    reval
+    bra main2
 
-    bra main2 
-evns  goto  evns1
-    bra   main2
-
-reboot  btfss Mode,1
-    bra   reboot1
-    call  thisNN
+reboot              ; 0x5C  reboot
+    btfss Mode,1      ; FLiM mode?...
+    bra   reboot1     ; ... then check NN
+    call  thisNN    
     sublw 0
     bnz   notNN
-reboot1 movlw 0xFF
+    
+reboot1 
+    movlw 0xFF
     movwf EEADR
     movlw 0xFF
-    call  eewrite     ;set last EEPROM byte to 0xFF
-    reset         ;software reset to bootloader
+    call  eewrite     ; set last EEPROM byte to 0xFF
+    reset         ; software reset to bootloader
 
-chklrn  btfss Datmode,4
-    bra   main2 
-    bra   learn1
+chklrn              ; 0xD2 teach an event in learn mode
+    btfss Datmode,4   ; learn mode?
+    bra   main2
+    call  copyev  
+    bra   do_learn
 
-main2 bcf   Datmode,0
-    goto  main      ;loop
+main2
+    bcf   Datmode,0
     
-setNN btfss Datmode,2   ;in NN set mode?
-    bra   main2     ;no
-    call  putNN     ;put in NN
+#ifdef  TESTMODE
+    tstfsz  Testmode    ; check for testmode
+    return
+#endif
+    goto  main      ; loop
+    
+setNN             ; 0x42 set NN in setup mode
+    btfss Datmode,2   ; in NN set mode?
+    bra   main2     ; no
+    call  putNN     ; put in NN
     bcf   Datmode,2
     bsf   Datmode,3
     movlw .10
-    movwf Keepcnt     ;for keep alive
+    movwf Keepcnt     ; for keep alive
     movlw 0x52
-    call  nnrel     ;confirm NN set
-    bsf   LED_PORT,LED2 ;LED ON
+    call  nnrel     ; confirm NN set
+    bsf   LED_PORT,LED2 ; LED ON
     bcf   LED_PORT,LED1
     bra   main2
     
-sendNN  btfss Datmode,2   ;in NN set mode?
-    bra   main2     ;no
-    movlw 0x50      ;send back NN
+sendNN
+    btfss Datmode,2   ; in NN set mode?
+    bra   main2     ; no
+    movlw 0x50      ; send back NN
     movwf Tx1d0
     movlw 3
     movwf Dlc
     call  sendTX
     bra   main2
 
-rden  goto  rden1
-
-
-    
-setlrn  call  thisNN
+rden              ; 0x56 read number of events available
+    call  thisNN
     sublw 0
     bnz   notNN
-    bsf   Datmode,4
-    bsf   LED_PORT,LED2     ;LED on
-    bra   main2
-
-notlrn  call  thisNN
-    sublw 0
-    bnz   notNN
-    bcf   Datmode,4
-notln1    ;leave in learn mode
-    bcf   Datmode,5
-;   bcf   LED_PORT,LED2
-    bra   main2
-clrens  call  thisNN
-    sublw 0
-    bnz   notNN
-    btfss Datmode,4
-    bra   clrerr
-    call  clrflsh
-    bra   notln1
-notNN bra   main2
-clrerr  movlw 2     ;not in learn mode
-    goto  errmsg
-
-    
-
-    
-
-short clrf  Rx0d1
-    clrf  Rx0d2
-    bra   go_on 
-    
-
-    
-go_on btfss Mode,1      ;FLiM?
-    bra   go_on_s
-    btfsc Datmode,4
-    bra   learn1      ;is in learn mode
-    
-go_on1  call  enmatch
-    sublw 0
-    bz    do_it
-    bra   main2     ;not here
-
-go_on_s btfss PORTC,LEARN
-    bra   learn1      ;is in learn mode
-    bra   go_on1
-
-
-
-readENi call  thisNN      ;read event by index
-    sublw 0
-    bnz   notNN
-    call  enrdi
-    bra   main2
-
-
-paraerr movlw 3       ;error not in setup mode
-    goto  errmsg
-
-para1a  call  thisNN      ;read parameter by index
-    sublw 0
-    bnz   notNN
-    call  para1rd
-    bra   main2
-
-readEN  call  thisNN
-    sublw 0
-    bnz   notNN
-    call  enread
-    bra   main2
-    
-do_it 
-    call  ev_set      ;do it (not yet)
-    clrf  ENcount
-    
-    bra   main2
-
-rden1 call  thisNN
-    sublw 0
-    bnz   notNN
-    movlw LOW ENindex+1   ;read number of events available
+    movlw LOW ENCount+1 ;read number of events available
     movwf EEADR
     call  eeread
-    sublw EN_NUM
     movwf Tx1d3
     movlw 0x70
     movwf Tx1d0
     movlw 4
     movwf Dlc
     call  sendTX
-    bra   main2   
+    bra   main2
+
+setlrn              ; 0x53 set learn mode
+    call  thisNN
+    sublw 0
+    bnz   notNN
+    bsf   Datmode,4
+    bsf   LED_PORT,LED2 ;LED on
+    bra   main2
+
+notlrn              ; 0x54 clear learn mode
+    call  thisNN
+    sublw 0
+    bnz   notNN
+    bcf   Datmode,4   ; clear learn flag
+    bra   main2
     
+clrens
+    call  thisNN
+    sublw 0
+    bnz   notNN
+    btfss Datmode,4
+    bra   clrerr
+    call  initevdata
+    call  clrmtrx
+notNN
+    bra   main2
+
+readEN
+    call  thisNN
+    sublw 0
+    bnz   notNN
+    call  enread
+    bra   main2
     
-learn1  btfss Mode,1      ;FLiM?
-    bra   learn2
-    movlw 0xD2
-    subwf Rx0d0,W     ;is it a learn command
-    bz    learn2      ;OK
-    movlw 0x95      ;is it unlearn
-    subwf Rx0d0,W
-    bz    learn2
-    movlw 0xB2
-    subwf Rx0d0
-    bz    learn2
-    movlw 1       ;cmd not supported
+para1a
+    call  thisNN      ;read parameter by index
+    sublw 0
+    bnz   notNN
+    call  para1rd
+    bra   main2
+
+clrerr  movlw 2       ;not in learn mode
+    goto  errmsg
+
+go_on
+    call  copyev      ; save event info
+    btfss Mode,1      ;FLiM?
+    bra   go_on_s     ; j if SLiM
+    
+go_on1  
+    call  enmatch
+    sublw 0
+    bz    do_it
+    bra   main2     ;not here
+
+go_on_s
+#ifdef TESTMODE
+    tstfsz  Testmode
+    bra   go_on1
+#endif    
+    call  getop     ; get the switches, updates EVdata and EVidx
+    btfsc PORTC,LEARN
+    bra   go_on_s1    ; j if learn not set
+    btfsc PORTC,UNLEARN
+    bra   learns
+    call  unlearn
+    bra   do_it
+;   bra   main2
+    
+learns              ; learn event in SLiM mode
+    call  learn
+    sublw 0
+    bnz   lrnerr
+    btfss EVtemp,6    ; test POL flag
+    bra   endlrns     ; j if POL not set
+    movlw 8
+    addwf EVidx     ; index of POL byte
+    call  learn     ; update POL info
+endlrns
+    bra   do_it     ; try it
+    
+lrnerr  movlw 4
     goto  errmsg1
-;   bra   l_out2
-
-learn2  call  enmatch     ;is it there already?
-    sublw   0
-    bz    isthere
-    btfsc Mode,1      ;FLiM?
-    bra   learn3
-    btfss PORTC,UNLEARN ;if unset and not here
-    bra   l_out2      ;do nothing else 
-    call  learnin     ;put EN into stack and RAM
-    sublw 0
-    bz    new_EV
-    movlw 4
-    goto  errmsg1     ;too many
-learn3  btfsc Datmode,6   ;read EV?
-    bra   rdbak1      ;not here
-    btfsc Datmode,5   ;if unset and not here
-    bra   l_out1      ;do nothing else 
-learn4  call  learnin     ;put EN into stack and RAM
-    sublw 0
-    bz    new_EV
+    
+go_on_s1            ; learn not set, test unlearn
+    btfsc PORTC,UNLEARN
+    bra   go_on1      ; no switches set, so action event
+    call  unlrnled    ; remove led from event
+    bra   do_it
+;   bra   main2
+    
+do_it 
+    call  rdfbev24  ; read relevant event data
+    lfsr  FSR0, led00
+    lfsr  FSR1, pol00
+    lfsr  FSR2,Matrix
+    movlw 8
+    movwf Count
+    btfsc Rx0d0,0   ; is it ON cmnd
+    bra   offcmnd   ; j if OFF    
+nxtled
+    movff POSTINC1, Temp  ; POL bits
+    comf  Temp,w      ; invert
+    andwf INDF2     ; turn off POL bits in matrix
+    andwf POSTINC0,w    ; remove POL bits from data
+    iorwf POSTINC2    ; and 'or' into matrix
+    decfsz  Count
+    bra   nxtled
+#ifdef TESTMODE
+    return
+#endif
+    bra   main2
+    
+offcmnd
+    movff POSTINC0, Temp  ; leds which may be ON
+    comf  Temp,w      ; invert
+    andwf INDF2     ; turn them off in matrix
+    movf  POSTINC1,w    ; get POL bits
+    iorwf POSTINC2    ; or into matrix
+    decfsz  Count
+    bra   offcmnd
+#ifdef TESTMODE
+    return
+#endif
+    bra   main2
+    
+do_learn
+    movf  EVidx,w     ; indexes start at 1
+    bnz   do_lrn1
+    bra   main2
+do_lrn1
+    decf  EVidx     ; index now zero based
+    call  learn
+    sublw 0       ; check if no space left
+    bz    lrnend
     movlw 4
     goto  errmsg2     
-    bra   l_out1      ;too many
-isthere btfsc Mode,1
-    bra   isth1     ;skip looking at switch
-    btfss PORTC,UNLEARN ;is it here and unlearn,goto unlearn
-    bra   unlearn     ;else modify EVs
-    bra   mod_EV
+lrnend  
+    goto  do_it
     
-isth1 btfss Datmode,5   ;FLiM unlearn?
-    bra   mod_EV
-    bra   unlearn
-  
-
-
-rdbak movff EVtemp,Tx1d5    ;Index for readout  
-    incf  Tx1d5,F       ;add one back 
-    bsf   EECON1,RD     ;address set already
-    movff EEDATA,Tx1d6
-    bra   shift4
-rdbak1  movlw 5       ;no match
-    goto  errmsg2     
-  
-
-shift4  movlw 0xD3        ;readback of EVs
-    movwf Tx1d0
-    movff Rx0d1,Tx1d1
-    movff Rx0d2,Tx1d2
-    movff Rx0d3,Tx1d3
-    movff Rx0d4,Tx1d4
-    movlw 7
-    movwf Dlc
-    call  sendTXa 
-    bra   l_out1
-
-new_EV  btfsc Mode,1        ;FLiM?
-    bra   new_EVf       ;not relevant if FLiM
-    movlw LOW ENindex+1   ;here if a new event
-    movwf EEADR
-    bsf   EECON1,RD
-    decf  EEDATA,W
-    movwf ENcount       ;recover EN counter
+do_unlearn
+    call  unlearn
+    bra   do_it
     
-    
-mod_EV  btfsc Mode,1        ;FLiM?
-    bra   mod_EVf       ;not relevant if FLiM
-    call  getop       ;read switch for LED number
-    movf  ENcount,W       ;recover EN counter
-    
-    addlw LOW EVstart       ;point to EV
-    movwf EEADR
-    
-  
-    movf  EVtemp,W
-        
-;   iorwf EEDATA,W
-    movwf Temp
-    call  eewrite       ;put back EV value  
-  
-    movff Temp,EVtemp
-    call  ev_set        ;try it
-    bra   l_out2
-
-  
-
-
-new_EVf movlw LOW ENindex+1   ;here if a new event in FLiM mode
-    movwf EEADR
-    bsf   EECON1,RD
-    decf  EEDATA,W
-    movwf ENcount       ;recover EN counter
-mod_EVf movff Rx0d5,EVtemp  ;store EV index
-    movf  EVtemp,F    ;is it zero?
-    bz    noEV
-    decf  EVtemp,F    ;decrement. EVs start at 1
-    movlw EV_NUM
-    cpfslt  EVtemp
-    bra   noEV    
-;   btfsc Datmode,5   ;is it here and unlearn,goto unlearn
-;   bra   unlearn     ;else modify EVs
-    
-    movff Rx0d6,EVtemp2 ;store EV
-;   removed decrement
-;   decf  EVtemp2,F   ;LED numbers start at 0, EV values at 1
-    
-    
-    movf  ENcount,W     ;one byte per EV
-    addlw LOW EVstart     ;point to EV
-    movwf EEADR
-    movf  EVtemp,W      ;add index to EEPROM value
-    addwf EEADR,F
-    btfsc Datmode,6     ;is it readback
-    bra   rdbak
-    movf  EVtemp2,W
-    call  eewrite       ;put in
-    bra   l_out2
-
-
-      
+do_rdev
+    tstfsz  EVidx
+    bra   do_rdev1
+rdeverr
+    clrf  EVdata
+    clrf  EVidx
+    call  endrdev
+    goto  main2
+do_rdev1
+    decf  EVidx     ; index starts at zero
+    movlw .16
+    cpfslt  EVidx
+    bra   rdeverr
+    call  readev
+    goto  main2
 
 l_out bcf   Datmode,4
 ;   bcf   LED_PORT,LED2
 l_out1  bcf   Datmode,6
 l_out2  bcf   Datmode,0
     
-
     clrf  PCLATH
     goto  main2
-    
-noEV  movlw 6       ;invalid EV#
-    goto  errmsg2
-
-
-                ;unlearn an EN. 
-unlearn movlw LOW ENindex+1   ;get number of events in stack
-    movwf EEADR
-    bsf   EECON1,RD
-    
-    movff EEDATA,ENend
-    movff EEDATA,Blk_lst    ;work out which block is last
-    rrncf Blk_lst,F     ;divide by 16
-    rrncf Blk_lst,F
-    rrncf Blk_lst,F
-    rrncf Blk_lst,W
-    andlw B'00001111'
-    movwf Blk_lst
-    movff ENcount,ENtempl ;point to EN in stack
-    movff ENcount,Blk_st    ;work out the first block 
-    rrncf Blk_st,F      ;divide by 16
-    rrncf Blk_st,F
-    rrncf Blk_st,F
-    rrncf Blk_st,W
-    andlw B'00001111'     ;16 blocks max.
-    movwf Blk_st
-    subwf Blk_lst,W
-    movwf Blk_num       ;number of blocks to shift
-                  ;now get table pointer
-    clrf  ENtemph
-    rlncf ENtempl,F     ;double it for pointing to Table 
-    bcf   STATUS,C
-    rlcf  ENtempl,F     ;double it
-    rlcf  ENtemph,F     ;if carry from ENtempl
-unlrn1  movlw B'11000000'
-    andwf ENtempl,W
-    movwf TBLPTRL       ;start of 64 byte block
-    movf  ENtemph,W
-    addlw 0x39
-    movwf TBLPTRH
-    
-    movlw .68         ;read block + 4 more
-    movwf Flcount
-    lfsr  FSR2,Flash_buf    ;point to holding buffer
-    clrf  TBLPTRU
-    
-    
-read_block  
-    tblrd*+       ;read into TABLAT and increment
-    movf  TABLAT,W
-    movwf POSTINC2
-    decfsz  Flcount
-    bra   read_block
-    
-    lfsr  FSR1,Flash_buf    ;use both FSR1 and FSR2 for shuffle
-    lfsr  FSR2,Flash_buf+4
-    movf  ENtempl,W
-    andlw B'00111111'     ;64 byte range
-    addwf FSR1L,F       ;FSR1 points to EN to remove
-    addwf FSR2L,F       ;FSR2 points to EN to shift up
-        
-shuff1  movff POSTINC2,POSTINC1
-    movlw LOW Flash_buf+0x41    ;one past end of block
-    subwf FSR1L,W
-    bnz   shuff1
-    
-erase movf  ENtempl,W     ;point to start of block to erase
-    movwf TBLPTRL
-    movf  ENtemph,W
-    addlw 0x39
-    movwf TBLPTRH
-    bsf   EECON1,EEPGD    ;set up for erase
-    bcf   EECON1,CFGS
-    bsf   EECON1,WREN
-    bsf   EECON1,FREE
-    clrf  INTCON
-    bsf   PORTC,2       ;LEDs off
-    movlw 0x55
-    movwf EECON2
-    movlw 0xAA
-    movwf EECON2
-    bsf   EECON1,WR     ;erase
-    nop
-    movlw B'11000000'
-    movwf INTCON        ;reenable interrupts
-    bcf   PORTC,2       ;LEDs on
-    
-    
-    
-    movlw B'11000000'
-    andwf TBLPTRL,F     ;put to 64 byte boundary
-    tblrd*-           ;back 1
-    lfsr  FSR2,Flash_buf    ;ready for rewrite
-    movlw .8
-    movwf Flcount
-write movlw .8
-    movwf Flcount1
-    
-write1  movf  POSTINC2,W
-    movwf TABLAT
-    tblwt+*
-    decfsz  Flcount1
-    bra   write1
-    bsf   EECON1,EEPGD    ;set up for write back
-    bcf   EECON1,CFGS
-    bcf   EECON1,FREE
-    bsf   EECON1,WREN
-  
-    clrf  INTCON
-    
-    bsf   PORTC,2       ;LEDs off
-    movlw 0x55
-    movwf EECON2
-    movlw 0xAA
-    movwf EECON2
-    bsf   EECON1,WR     ;write back
-    nop
-    nop
-    nop
-    decfsz  Flcount
-    bra   write       ;next block of 8
-    movf  Blk_num,F
-    bz    lastblk
-    decf  Blk_num,F
-    tblrd*+
-    movf  TBLPTRL,W
-    movwf ENtempl
-    movf  TBLPTRH,W
-    movwf ENtemph
-    movlw 0x39
-    subwf ENtemph,F
-      
-    bra   unlrn1        ;shift up next block
-    
-lastblk movlw LOW EVstart
-    addwf ENend,F       ;last in EEPROM
-    incf  ENend,F
-    movlw LOW EVstart
-    addwf ENcount       ;point to one to remove
-    incf  ENcount,W
-    movwf EEADR
-evshift call  eeread
-    decf  EEADR
-    call  eewrite
-    incf  EEADR
-    incf  EEADR
-    movf  ENend,W
-    subwf EEADR,W
-    bnz   evshift
-
-    
-    
-    movlw LOW ENindex+1
-    movwf EEADR
-    bsf   EECON1,RD
-    movf  EEDATA,W
-    movwf Temp
-    decf  Temp,W
-    call  eewrite     ;put back number in stack less 1
-    bcf   EECON1,WREN
-    movlw B'11000000'
-    movwf INTCON        ;reenable interrupts
-    bcf   PORTC,2       ;LEDs on
-    bra   l_out
-
-do    btfss Mode,1      ;in FLiM?
-    bra   do1       ;no
-    btfss Datmode,3   ;ignore if not set up
-    bra   do1
-    btfsc Datmode,2   ;don't do if in setup   
-    bra   do1
-    
-;   call  producer    ;call the routine that gives producer events
-                ;e.g. scans inputs for change
-                
-do1   goto  main
-    
-
     
 ;***************************************************************************
 ;   main setup routine
 ;*************************************************************************
-setup clrf  INTCON      ;no interrupts yet
+setup lfsr  FSR0, 0
+nextram clrf  POSTINC0
+    btfss FSR0L, 7
+    bra   nextram
+    
+    clrf  INTCON      ;no interrupts yet
     clrf  ADCON0      ;ADC is off
     movlw B'00001111'   ;set Port A to all digital for now
     movwf ADCON1
@@ -2104,12 +1867,8 @@ setup clrf  INTCON      ;no interrupts yet
     clrf  PORTC     ;all outputs off
     bsf   PORTC,2     ;LEDs off
     
-  
-
-    
     bsf   RCON,IPEN   ;enable interrupt priority levels
     clrf  BSR       ;set to bank 0
-  ; clrf  EECON1      ;no accesses to program memory  
     clrf  Datmode
     clrf  Latcount
     clrf  ECANCON     ;CAN mode 0 for now
@@ -2138,8 +1897,6 @@ mskloop clrf  POSTINC0
     cpfseq  FSR0L
     bra   mskloop
     
-    
-  
     clrf  CANCON      ;out of CAN setup mode
     clrf  CCP1CON
     movlw B'10000001'   ;Timer 1 control.16 bit write
@@ -2148,52 +1905,25 @@ mskloop clrf  POSTINC0
     movwf TMR1H     ;set timer hi byte
     movlw B'10000100'
     movwf T0CON     ;set Timer 0 for LED flash
-    
     clrf  Tx1con
-    
     movlw B'00100011'
     movwf IPR3      ;high priority CAN RX  interrupts(for now)
     clrf  IPR1      ;all peripheral interrupts are low priority
     clrf  IPR2
     clrf  PIE2
-    
-    
-    
-    
-    
-    
-    
-    lfsr  FSR2,Matrix   ;clear LED matrix
-matclr  clrf  POSTINC2
-    movlw Matrix + 8
-    subwf FSR2L,W
-    bnz   matclr
-    
-    
+    call  clrmtrx     ; clear the matrix
     
     movlw B'00000001'
     movwf IDcount     ;set at lowest value for starters
-    
     clrf  INTCON2     ;enable port B pullups 
     clrf  INTCON3     ;just in case
-    
     bsf   PIE1,TMR1IE   ;enable Timer 1 interrupts
     movlw B'00100011'   ;Rx0 and RX1 interrupt and Tx error
-    movwf PIE3  
-;*******************************************************************************8   
-    
-    
-  
+    movwf PIE3
     clrf  PIR1
     clrf  PIR2
-    movlb .15
-    bcf RXB1CON,RXFUL
-    movlb 0
-    bcf RXB0CON,RXFUL   ;ready for next
-    bcf COMSTAT,RXB0OVFL  ;clear overflow flags if set
-    bcf COMSTAT,RXB1OVFL
     clrf  PIR3      ;clear all flags
-    
+    bcf   RXB0CON,RXFUL
 
       ;   test for setup mode
     clrf  Mode
@@ -2203,13 +1933,17 @@ matclr  clrf  POSTINC2
     movwf Datmode
     sublw 0       ;not set yet
     bnz   setid
+    movlw LOW FreeCh
+    movwf EEADR
+    call  eeread
+    addlw 0
+    bnz   slimset     ; j if free chain exists
+    call  initevdata    ; clear event data flash and eeprom
     bra   slimset     ;wait for setup PB
 
 setid bsf   Mode,1      ;flag FLiM
     call  newid_f     ;put ID into Tx1buf, TXB2 and ID number store
 
-seten_f ;call en_ram      ;put events in RAM
-  
     movlw B'11000000'
     movwf INTCON      ;enable interrupts
     bcf   LED_PORT,LED1
@@ -2222,9 +1956,8 @@ slimset bcf   Mode,1
     btfss PORTC,LEARN   ;ignore the clear if learn is set
     goto  seten
     btfss PORTC,UNLEARN
-    call  clrflsh     ;clear all events if unlearn is set during power up
-seten ;call en_ram      ;put events in RAM
-
+    call  initevdata      ;clear all events if unlearn is set during power up
+seten
     bsf   PORTB,7     ;on LED
     bcf   PORTB,6
     movlw B'11000000'
@@ -2239,7 +1972,971 @@ setloop
 
     call  enum      ;sends RTR frame
     bra   main      
+
+;**************************************************************************
+;
+; test routines. TESTMODE must be defined to compile them
+#ifdef  TESTMODE    
+setupex
+  movlw 1
+  movwf Testmode    ; set testing flag
+  call  initevdata
+  movlw .16
+  movwf Count3
+  clrf  TestTemp
+  movlw 1
+  movwf setevt
+  
+nxttest           ; loop to create 16 events
+  movf  Count3,w
+  incf  TestTemp
+  movff TestTemp, Temp
+  call  setev
+  call  learns
+  movlw 0x07
+  andwf TestTemp
+  movlw 0x03
+  andwf setevt
+  bnz   nxttest2
+  incf  setevt
+nxttest2
+  decfsz  Count3  
+  bra   nxttest
+  
+  bsf   Mode,1      ; set FLiM mode
+  call  clrmtrx     ; clear the matrix  
+  ; test 0x58 - read stored events
+  
+  movlw 0x58
+  call  testcmd
+  
+  ; test 0x56 - read event space left
+  movlw 0x56
+  call  testcmd
+
+  ; test event learning 
+  movlw 1
+  movwf EVidx
+  movlw 0xff
+  movwf EVdata
+  call  testsetlrn    ; set learn mode
+  call  testlrnev
+  call  testsetunl    ; unset learn mode  
+  call  testevon    ; test on event
+  call  testevoff   ; test off event
+  
+  ; test POL bits
+  movlw 9
+  movwf EVidx
+  movlw 0xaa
+  movwf EVdata
+  call  testsetlrn    ; set learn mode  
+  call  testlrnev
+  call  testsetunl    ; clear learn mode
+  call  testevon    ; test on event
+  call  testevoff
+  
+  call  testlrnev   ; try not in learn mode
+  
+  ; test to read event by index
+  movlw LOW ENCount
+  movwf EEADR
+  call  eeread
+  movwf ENidx
+  movlw 0x72
+  movff ENidx,Rx0d3
+  call  testcmd
+  call  packet
+
+  movlw 1
+  call  testreadev
+  movlw 17      ; one more than maximum
+  call  testreadev
+  
+  call  testsetlrn
+  call  testunlrnev
+  call  testsetunl
+
+endloop
+  goto  endloop 
+  
+testcmd
+  movwf Rx0d0     ; sends <cmd><NN hi><NN lo>
+  movlw LOW NodeID
+  movwf EEADR
+  call  eeread
+  movwf Rx0d1
+  incf  EEADR
+  call  eeread
+  movwf Rx0d2
+
+  return
+  
+testsetlrn
+  movlw 0x53    ; set learn mode
+  call  testcmd
+  call  packet
+  return
+  
+testsetunl        ; clear learn mode
+  movlw 0x54
+  call  testcmd
+  call  packet
+  
+testlrnev
+  movlw 0xd2    ; learn event cmnd
+  movwf Rx0d0
+  call  testmakeev
+  movff EVidx,Rx0d5
+  movff EVdata,Rx0d6
+  call  packet
+  return
+  
+testunlrnev
+  movlw 0x95
+  movwf Rx0d0
+  call  testmakeev
+  call  packet
+  return
+  
+testevon
+  movlw 0x90
+  movwf Rx0d0
+  call  testmakeev
+  call  packet
+  return
+  
+testevoff
+  movlw 0x91
+  movwf Rx0d0
+  call  testmakeev
+  call  packet
+  return
+  
+testreadev
+  ; test read event variable in learn mode
+  movwf Temp
+  call  testsetlrn    ; set learn mode
+  movlw 0xb2
+  movwf Rx0d0
+  call  testmakeev    ; use last event written
+  movff Temp, Rx0d5
+  call  packet
+  call  testsetunl    ; out of learn mode
+  return
+
+  
+testmakeev        ; creates ev 01 07 00 14
+  movlw 0x01
+  movwf Rx0d1
+  movlw 0x07
+  movwf Rx0d2
+  clrf  Rx0d3
+  movlw 0x14
+  movwf Rx0d4
+  return
+  
+#endif
+
+;**************************************************************************
+;
+; learn an event
+
+learn   ; data is in ev(n), EVdata and EVidx
+  call  enmatch
+  sublw 0
+  bnz   newev
+  call  rdfbev      ; and fetch the data
+  
+lrn2
+  lfsr  FSR0,led00    ; point at led data in lower block
+  lfsr  FSR2,Matrix
+  movlw 0x20      ; check if ev is in lower or upper block
+  andwf evaddrl,w
+  btfss STATUS, Z   ; j if lower block
+  lfsr  FSR0, led10   ; point at led data in upper block
+  btfsc EVidx,3     ; check if updating POL bit
+  bra   lrn2a     ; j if yes
+  movf  EVidx,w
+  movff PLUSW0, EVtemp1 ; new data
+  comf  EVtemp1
+  movf  PLUSW2,w    ; get current matrix data
+  andwf EVtemp1     ; clear leds in new data
+  movf  EVidx,w
+  movff EVtemp1,PLUSW2  ; update matrix - do_it will sort out correct leds
+lrn2a
+  btfss Mode,1      ; is it FLiM?
+  bra   lrn2s     ; j if SLiM
+  
+  movf  EVidx,w
+  movff EVdata, PLUSW0  ; in FLiM mode, just overwrite the existing EV
+  bra   endlrn2
+  
+      ; in SLiM mode, 'or' in the additional LED bit
+      ; and clear the equivalent POL bit...
+      ; ...if not updating POL data
+lrn2s               
+  movff EVdata, EVtemp1 
+  movf  EVidx,w     ; index of led dat
+  movf  PLUSW0,w    ; get led data
+  iorwf EVtemp1     ; or in new led bit
+  movf  EVidx,w
+  movff EVtemp1, PLUSW0 ; and write back
+  btfsc EVidx,3     ; check if EVidx is pointing at POL byte...
+  bra   endlrn2     ;... j if it is
+  movff EVdata, EVtemp1 ; recopy data...
+  comf  EVtemp1     ;... and deal with POL bit
+  addlw 8       ; POL byte
+  movf  PLUSW0, w   ; read POL byte
+  andwf EVtemp1     ; remove POL bit
+  movf  EVidx,w     ; index of...
+  addlw 8       ; ... POL byte
+  movff EVtemp1, PLUSW0 ; write POL byte back
+  
+endlrn2
+  call  wrfbev      ; update flash ram
+  retlw 0
+  
+newev   
+  ; check remaining space
+  movlw LOW ENCount+1
+  movwf EEADR
+  call  eeread
+  sublw 0
+  bnz   lrn1
+  retlw 1   ; no space left
+  
+lrn1  
+  movlw LOW FreeCh  ; get free chain pointer
+  movwf EEADR
+  call  eeread
+  movwf evaddrh
+  movlw LOW FreeCh + 1
+  movwf EEADR
+  call  eeread
+  movwf evaddrl
+  
+  ; now check and update hash table pointer
+  tstfsz  htaddrh
+  bra   htok
+  bra   newev2    ;j if no hash table for this event
+
+htok  ; hash table pointer is valid so read data
+  movlw 0x20
+  andwf htaddrl,w
+  movwf CountFb1  ; first or second block flag
+  call  rdfbht    ; read from hash table address
+  tstfsz  CountFb1  ; j if first block
+  bra   newev0
+  movff evaddrh, prev0h
+  movff evaddrl, prev0l
+  bra   newev1
+newev0
+  movff evaddrh, prev1h
+  movff evaddrl, prev1l
+newev1
+  call  wrfbht    ; write back using hash table address
+  
+newev2    ; read free chain data block
+  movlw 0x20
+  andwf evaddrl,w ; first or second block?
+  movwf CountFb1
+  call  rdfbev    ; read free chain entry 
+  
+  ; now update FreeCh with next event pointer from event data
+  movlw LOW FreeCh
+  movwf EEADR
+  tstfsz  CountFb1  ; j if second block
+  bra   newev3
+  movff next0h, Temp
+  bra   newev4
+newev3
+  movff next1h,Temp
+newev4
+  movf  Temp,w
+  call  eewrite
+  
+  movlw LOW FreeCh+1
+  movwf EEADR
+  tstfsz  CountFb1  ; j if second block
+  bra   newev5
+  movff next0l, Temp
+  bra   newev6
+newev5
+  movff next1l,Temp
+newev6
+  movf  Temp,w
+  call  eewrite 
+  
+  ; write new event address to hash table
+  movff htidx, EEADR
+  movf  evaddrh,w
+  call  eewrite
+  incf  EEADR
+  movf  evaddrl,w
+  call  eewrite
+  
+  clrf  Temp
+  tstfsz  CountFb1  
+  bra   newev7    ; j if second block
+  movff htaddrh, next0h   ; copy previous head of chain address
+  movff htaddrl, next0l
+  movff Temp,prev0h     ; clear previous ptr
+  movff Temp,prev0l
+  movff ev0,evt00
+  movff ev1,evt01
+  movff ev2,evt02
+  movff ev3,evt03
+  lfsr  FSR0,led00
+  bra   newev8
+newev7
+  movff htaddrh, next1h   ; copy previous head of chain address
+  movff htaddrl, next1l
+  movff Temp,prev1h     ; clear previous ptr
+  movff Temp,prev1l
+  movff ev0,evt10     ; copy event data
+  movff ev1,evt11
+  movff ev2,evt12
+  movff ev3,evt13
+  lfsr  FSR0,led10
+newev8
+  movlw .16
+  movwf CountFb0
+  
+newev9
+  clrf  POSTINC0      ; clear event data
+  decfsz  CountFb0
+  bra   newev9
+  
+  movf  hnum,w        ; hash number of event
+  addlw LOW hashnum     ; update count of events in this hash
+  movwf EEADR
+  call  eeread
+  incf  WREG
+  call  eewrite
+  
+  movlw LOW ENCount
+  movwf EEADR
+  call  eeread
+  addlw 1
+  call  eewrite
+  incf  EEADR
+  call  eeread
+  decf  WREG
+  call  eewrite
+  bra   lrn2
+
+;**************************************************************************
+;
+; unlearn an event
+
+unlearn     ; on entry the target event number must be in ev0-3
+  call  enmatch
+  sublw 0
+  bz    unl1      ; j if event found
+  return
+  
+unl1
+  movlw LOW FreeCh    ; get free chain address
+  movwf EEADR
+  call  eeread
+  movwf freadrh
+  movlw LOW FreeCh+1
+  movwf EEADR
+  call  eeread
+  movwf freadrl
+  
+  call  rdfbev        ; read entry
+  lfsr  FSR2, Matrix
+  movlw 0x20
+  andwf evaddrl,w
+  bnz   unl2        ; j if in upper block
+  lfsr  FSR0,led00
+  call  remove
+  movff next0h, nextadrh  ; save chain pointers
+  movff next0l, nextadrl
+  movff prev0h, prevadrh
+  movff prev0l, prevadrl
+  movff freadrh, next0h   ; set next ptr to current free chain
+  movff freadrl, next0l
+  bra   unl3
+unl2
+  lfsr  FSR0,led10
+  call  remove
+  movff next1h, nextadrh  ; save chain pointers
+  movff next1l, nextadrl
+  movff prev1h, prevadrh
+  movff prev1l, prevadrl
+  movff freadrh, next1h   ; set next ptr to current free chain
+  movff freadrl, next1l
+unl3
+  movlw LOW FreeCh    ; update free chain address to current entry
+  movwf EEADR
+  movf  evaddrh,w
+  call  eewrite
+  movlw LOW FreeCh+1
+  movwf EEADR
+  movf  evaddrl,w
+  call  eewrite
+  
+  call  wrfbev      ; write freed event data back
+  
+  tstfsz  prevadrh    ; check if previous link id valid
+  bra   unl4      ; j if it is
+  bra   unl6a
+
+unl4            ; read and update previous event entry
+  movff prevadrh, evaddrh
+  movff prevadrl, evaddrl
+  call  rdfbev
+  movlw 0x20
+  andwf evaddrl,w
+  bnz   unl5      ; j if upper block
+  movff nextadrh, next0h
+  movff nextadrl, next0l
+  bra   unl6
+unl5
+  movff nextadrh, next1h
+  movff nextadrl, next1l
+unl6
+  call  wrfbev      ; write back with updated next pointer
+  bra   unl7
+  
+unl6a           ;must write next ptr to hash table
+  movff htidx, EEADR
+  movf  nextadrh,w
+  call  eewrite
+  incf  EEADR
+  movf  nextadrl,w
+  call  eewrite
+
+unl7
+  tstfsz  nextadrh    ; check if next link is valid
+  bra   unl8      ; j if it is
+  bra   unl11     ; no more to do
+  
+unl8
+  movff nextadrh, evaddrh
+  movff nextadrl, evaddrl
+  call  rdfbev
+  movlw 0x20
+  andwf evaddrl, w
+  bnz   unl9
+  movff prevadrh, prev0h
+  movff prevadrl, prev0l
+  bra   unl10
+unl9
+  movff prevadrh, prev1h
+  movff prevadrl, prev1l
+unl10
+  call  wrfbev
+
+unl11
+  movf  hnum, w       ; hash number of event
+  addlw LOW hashnum     ; update number of events for this hash
+  movwf EEADR
+  call  eeread
+  decf  WREG
+  call  eewrite
+
+  movlw LOW ENCount     ; update free space and no of events
+  movwf EEADR
+  call  eeread
+  decf  WREG
+  call  eewrite
+  incf  EEADR
+  call  eeread
+  addlw 1
+  call  eewrite 
+  return
+  
+remove      ; remove all leds for event from Matrix
+  movlw 8
+  movwf Count3
+nxtrem
+  movff POSTINC0,Temp   ; get EV data
+  comf  Temp,w
+  andwf POSTINC2      ; remove from matrix
+  decf  Count3
+  bnz   nxtrem
+  return
+  
+;************************************************************************** 
+;
+; remove an LED from event - Slim mode only
+
+unlrnled
+  call  enmatch
+  sublw 0
+  bz    unled1      ; j if event found
+  return
+
+unled1
+  call  rdfbev      ; get the data
+  lfsr  FSR0,led00    ; point at led data in lower block
+  lfsr  FSR2,Matrix   ; point at matrix
+  movlw 0x20      ; check if ev is in lower or upper block
+  andwf evaddrl,w
+  btfss STATUS, Z   ; j if lower block
+  lfsr  FSR0, led10   ; point at led data in upper block
+  movf  EVidx,w
+  movff EVdata, EVtemp1 ; led to remove
+  comf  EVtemp1
+  movf  PLUSW2,w    ; current matrix data
+  andwf EVtemp1     ; remove led from matrix data...
+  movf  EVidx,w
+  movff EVtemp1, PLUSW2 ; ...and write back to matrix
+  movff EVdata,EVtemp1  ; get data again
+  comf  EVtemp1
+  movf  PLUSW0,w    ; get led data
+  andwf EVtemp1     ; remove led bit
+  movf  EVidx,w
+  movff EVtemp1, PLUSW0 ; and write back
+  movff EVdata, EVtemp1 ; recopy data...
+  comf  EVtemp1     ;... and deal with POL bit
+  addlw 8       ; POL byte
+  movf  PLUSW0, w   ; read POL byte
+  andwf EVtemp1     ; remove POL bit
+  movf  EVidx,w     ; index of...
+  addlw 8       ; ... POL byte
+  movff EVtemp1, PLUSW0 ; write POL byte back
+  call  wrfbev      ; update flash ram
+  return
+
+;**************************************************************************
+;
+; read event variable
+  
+readev
+  call  enmatch
+  sublw 0
+  bz    readev1     ; j if event found
+  clrf  EVdata
+  clrf  EVidx
+  bra   endrdev
+  
+readev1
+  call  rdfbev24    ; get 24 bytes of event data
+  lfsr  FSR0, led00   ; point at EVs
+  movf  EVidx,w
+  movf  PLUSW0,w    ; get the byte
+  movwf EVdata
+  incf  EVidx     ; put back to 1 based
+  
+endrdev
+  movlw 0xD3
+  movwf Tx1d0
+  movff evt00,Tx1d1
+  movff evt01,Tx1d2
+  movff evt02,Tx1d3
+  movff evt03,Tx1d4
+  movff EVidx,Tx1d5
+  movff EVdata,Tx1d6
+  movlw 7
+  movwf Dlc
+  call  sendTXa
+  return
+
+;**************************************************************************
+;
+; clear all events and associted data structures
+
+initevdata    ; clear all event info        
+  movlw LOW ENCount   ; clear number of events
+  movwf EEADR
+  movlw 0
+  call  eewrite     ; no events set up
+  movlw 0xff
+  incf  EEADR
+  call  eewrite     ; set up no of free events
+
+  movlw .128
+  movwf Count 
+  movlw LOW hashtab
+  movwf EEADR
+  
+nextht            ; clear hashtable
+  movlw 0
+  call  eewrite
+  incf  EEADR
+  decfsz  Count
+  bra   nextht
+  
+  movlw .64
+  movwf Count
+  movlw LOW hashnum
+  movwf EEADR
+  
+nexthn            ; clear hash table count
+  movlw 0
+  call  eewrite
+  incf  EEADR
+  decfsz  Count
+  bra   nexthn
+  
+  call  clrev   ; erase all event data
+  movlw LOW FreeCh  ; set up free chain pointer in ROM
+  movwf EEADR
+  movlw HIGH evdata
+  movwf evaddrh
+  call  eewrite
+  movlw LOW FreeCh + 1
+  movwf EEADR
+  movlw 0
+  movwf evaddrl
+  call  eewrite
+  call  clrfb
+  clrf  prevadrh
+  clrf  prevadrl
+  
+  movlw .128
+  movwf Count   ; loop 128 times
+nxtev
+  movlw .32
+  addwf evaddrl,w
+  movwf Temp
+  movff Temp, next0l
+  movlw 0
+  addwfc  evaddrh,w
+  movwf Temp
+  movff Temp,next0h
+  movff prevadrh, prev0h
+  movff prevadrl, prev0l
+  movff evaddrh, prevadrh
+  movff evaddrl, prevadrl
+  movlw 1
+  subwf Count, W
+  bnz   nxtaddr
+  
+  clrf  Temp
+  movff Temp,next1h
+  movff Temp,next1l
+  movff prevadrh,prev1h
+  movff prevadrl, prev1l
+  bra   writefbs
+nxtaddr 
+  movlw .64
+  addwf evaddrl,w
+  movwf Temp
+  movff Temp, next1l
+  movlw 0
+  addwfc  evaddrh,w
+  movwf Temp
+  movff Temp, next1h
+  movff prevadrh,prev1h
+  movff prevadrl,prev1l
+  movff next0h, prevadrh
+  movff next0l, prevadrl
+writefbs
+  call  wrfbev
+  movlw .64
+  addwf evaddrl
+  movlw 0
+  addwfc  evaddrh
+  decfsz  Count
+  bra   nxtev
+  return
+  
+  
+;**************************************************************************
+;
+; routines for reading the event data
+
+rdfbht    ; on entry htaddrh and htaddrl must point to valid entry
+  movlw 0xc0
+  andwf htaddrl,w   ; align to 64 byte boundary
+  movwf TBLPTRL
+  movf  htaddrh,w
+  movwf TBLPTRH
+  movlw .64
+  movwf CountFb0
+  bra   rdfb
+  
+rdfbev    ; On entry evaddrh and evaddrl must point to the correct entry
+  movlw 0xc0
+  andwf evaddrl,w   ; align to 64 byte boundary
+  movwf TBLPTRL
+  movf  evaddrh,w
+  movwf TBLPTRH
+  clrf  TBLPTRU
+  movlw .64
+  movwf CountFb0
+rdfb
+  clrf  TBLPTRU
+  lfsr  FSR0,evt00
+nxtfbrd
+  tblrd*+
+  movf  TABLAT, w
+  movwf POSTINC0
+  decfsz  CountFb0
+  bra   nxtfbrd
+  return
+  
+rdfbev24    ; read first 24 bytes of event data, on entry evaddrh and evaddr must be valid
+  clrf  TBLPTRU
+  movff evaddrh, TBLPTRH
+  movff evaddrl, TBLPTRL
+  movlw 24
+  movwf CountFb0
+  bra   rdfb
+  
+rdfbev8   ; read first 8 bytes of event data, on entry evaddrh and evaddr must be valid
+  clrf  TBLPTRU
+  movff evaddrh, TBLPTRH
+  movff evaddrl, TBLPTRL
+  movlw 8
+  movwf CountFb0
+  bra   rdfb
+
+;**************************************************************************
+;
+; routine for finding an event - returns 0 on success, 1 on failure
+
+enmatch   ;on exit if success w = 0 and evaddrh/evaddrl point at led data
+  movlw 0x3f
+  andwf ev1,w   ;ls 6 bits as hash
+  movwf Temp
+  movwf hnum
+  rlncf Temp    ; times 2 as hash tab is 2 bytes per entry  
+  movlw LOW hashtab
+  addwf Temp, w
+  movwf htidx   ; save EEPROM offset of hash tab entry
+  movwf EEADR
+  call  eeread
+  movwf evaddrh
+  movwf htaddrh   ; save hash table point ms
+  incf  EEADR
+  call  eeread
+  movwf evaddrl
+  movwf htaddrl   ; save hash table pointer ls
+nextev
+  tstfsz  evaddrh   ;is it zero?, high address cannot be zero if valid
+  bra   addrok
+  retlw 1     ; not found
+  
+addrok
+  movf  evaddrl,w
+  movwf TBLPTRL
+  movf  evaddrh,w
+  movwf TBLPTRH
+  clrf  TBLPTRU
+  
+  clrf  Match
+  tblrd*+
+  movf  TABLAT,W
+  cpfseq  ev0
+  incf  Match
+  tblrd*+
+  movf  TABLAT,W
+  cpfseq  ev1
+  incf  Match
+  tblrd*+
+  movf  TABLAT,W
+  cpfseq  ev2
+  incf  Match
+  tblrd*+
+  movf  TABLAT,W
+  cpfseq  ev3
+  incf  Match
+  tstfsz  Match
+  bra   no_match
+  retlw 0
+  
+no_match    ;get link address to next event
+  tblrd*+
+  movf  TABLAT,w
+  movwf evaddrh
+  tblrd*+
+  movf  TABLAT,w
+  movwf evaddrl
+  bra   nextev
+  
+;**************************************************************************
+;
+; EEPROM routines
+
+eeread    ; On entry, EEADR must contain the EPROM address, W contains the data on exit
+  bcf   EECON1,EEPGD
+  bcf   EECON1,CFGS
+  bsf   EECON1,RD
+  movf  EEDATA, W
+  return
+  
+eewrite   ; On entry, EEADR must contain the address and W the data
+  movwf EEDATA    
+  bcf   EECON1,EEPGD
+  bcf   EECON1,CFGS
+  bsf   EECON1,WREN
     
+  clrf  INTCON  ;disable interrupts
+  movlw 0x55
+  movwf EECON2
+  movlw 0xAA
+  movwf EECON2
+  bsf   EECON1,WR
+eetest
+  btfsc EECON1,WR
+  bra   eetest
+  bcf   PIR2,EEIF
+  bcf   EECON1,WREN
+  movlw B'11000000'
+  movwf INTCON    ;reenable interrupts
+    
+  return
+
+;**************************************************************************
+;
+; routines for clearing flash ram
+  
+clrev   ; erase all of the event data area in flash
+  movlw .128
+  movwf Count   ; do 128 * 64 blockd
+  movlw 0
+  movwf TBLPTRL
+  movlw high evdata
+  movwf TBLPTRH
+  clrf  TBLPTRU
+nxtclr
+  call  clrflsh
+  decfsz  Count
+  bra   nxtblk
+  return
+nxtblk
+  movlw .64
+  addwf TBLPTRL,F
+  movlw 0
+  addwfc  TBLPTRH
+  bra   nxtclr
+  
+clrflsh   ; clears 64 bytes of flash ram, TBLPTR must point to target ram
+  bsf   EECON1,EEPGD    ;set up for erase
+  bcf   EECON1,CFGS
+  bsf   EECON1,WREN
+  bsf   EECON1,FREE
+  clrf  INTCON  ;disable interrupts
+  movlw 0x55
+  movwf EECON2
+  movlw 0xAA
+  movwf EECON2
+  bsf   EECON1,WR     ;erase
+  nop
+  nop
+  nop
+  movlw B'11000000'
+  movwf INTCON    ;reenable interrupts
+
+  return
+  
+clrfb   ; clears the 64 bytes data ram for ev data
+  lfsr  FSR0, evt00
+  movlw .64
+  movwf CountFb0
+nxtone
+  clrf  POSTINC0
+  decfsz  CountFb0
+  bra   nxtone
+  return
+
+;**************************************************************************
+;
+; routines fot writing flash
+;
+; erases flash ram and the writes data back
+; writes the 64 bytes of data ram back to flash ram
+; HTADDRH and EHTADDRL must contain the flash address on entry
+
+wrfbht
+  movlw 0xc0
+  andwf htaddrl,w   ; align to 64 byte boundary
+  movwf TBLPTRL
+  movf  htaddrh, W
+  movwf TBLPTRH
+  bra   wrfb
+  
+  ; erases flash ram and the writes data back
+  ; writes the 64 bytes of data ram back to flash ram
+  ; EVADDRH and EVADDRL must contain the flash address on entry
+wrfbev
+  movlw 0xc0
+  andwf evaddrl,w   ; align to 64 byte boundary
+  movwf TBLPTRL
+  movf  evaddrh, W
+  movwf TBLPTRH
+  
+wrfb
+  clrf  TBLPTRU
+  call  clrflsh
+  lfsr  FSR0, evt00
+  movlw 2
+  movwf CountFb1
+nxt32
+  movlw .24     ; only need to write 24 bytes
+  movwf CountFb0
+nxtfb
+  movf  POSTINC0, W
+  movwf TABLAT
+  tblwt*+
+  decfsz  CountFb0
+  bra   nxtfb
+  call  wrflsh
+  decfsz  CountFb1
+  bra   dofb32
+  return
+dofb32
+  movlw 8
+  addwf TBLPTRL
+  lfsr  FSR0, evt10
+  bra   nxt32
+  
+wrflsh    ; write upto 32 bytes of flash  
+  bsf   EECON1, EEPGD
+  bcf   EECON1,CFGS
+  bcf   EECON1,FREE     ;no erase
+  bsf   EECON1, WREN
+  bsf   PORTC,2       ;LEDs off
+  clrf  INTCON
+  movlw 0x55
+  movwf EECON2
+  movlw 0xAA
+  movwf EECON2
+  bsf   EECON1,WR
+  nop
+  movlw B'11000000'
+  movwf INTCON
+  bcf   PORTC,2       ;LEDs on
+  return
+  
+;**************************************************************************
+;
+; test routine
+;
+
+#ifdef TESTMODE
+setev   ; test routine to initialise event data
+      ; Temp the event node ls and w the event data(as per switches)
+  movwf EVtemp1   ; save data
+  call  getopx
+  bcf   EVtemp,6  ; copy POL bit from origianl data
+  btfsc EVtemp1, 6
+  bsf   EVtemp,6
+  movlw 1
+  movwf ev0
+  movff Temp, ev1
+  clrf  ev2
+  movff setevt,ev3
+  incf  setevt
+  
+  return
+  
+setcmnd
+  movwf Rx0d0
+  movff ev0,Rx0d1
+  movff ev1,Rx0d2 
+  movff ev2,Rx0d3
+  movff ev3,Rx0d4
+  return
+
+#endif  
 ;****************************************************************************
 ;   start of subroutines    
 
@@ -2275,100 +2972,20 @@ shuffin movff Rx0sidl,IDtempl
     andlw B'01111000'
     iorwf IDtempl,W     ;returns with ID in W
     return
-;********************************************************************
-;   Set an event in scan array.  arrives with EV in EVtemp 
 
-ev_set  call  ev_set1   ;single LED set
-    btfss EVtemp,7  ;toggle mode?
-    return
-    movf  EVtemp,W
-    addlw 1     ;next LED
-    andlw B'00111111' ;prevent overflow past 64
-    movwf EVtemp1   ;hold new number
-    btfss EVtemp,6  ;pol set?
-    bsf   EVtemp1,6
-    movff EVtemp1,EVtemp
-    call  ev_set1
-    return
-    
-
-
-ev_set1 movlw B'00000111'
-    andwf EVtemp,W
-    movwf Numtemp
-    movlw 1
-    movwf Roll    ;rolling bit
-set1  movf  Numtemp,F ;is it zero
-    bz    gotnum
-    rlncf Roll,F    ;roll bit
-    decf  Numtemp,F
-    bra   set1
-gotnum  movlw B'00111000'
-    andwf EVtemp,W
-    movwf Numtemp
-    rrncf Numtemp,F
-    rrncf Numtemp,F
-    rrncf Numtemp,W ;position of byte in matrix (0 to 7)
-    lfsr  2,Matrix
-    addwf FSR2L   ;offset
-    btfsc Rx0d0,0   ;is it ON?
-    bra   off
-    btfsc EVtemp,6  ;check POL
-    bra   off1
-on    movf  INDF2,W
-    iorwf Roll,W
-    movwf INDF2   
-    return      
-off   btfsc EVtemp,6  ;check POL
-    bra   on
-off1  movf  INDF2,W
-    comf  Roll,F
-    andwf Roll,W
-    movwf INDF2
+;*********************************************************************************
+;
+clrmtrx
+    lfsr  FSR2,Matrix   ;clear LED matrix
+matclr  clrf  POSTINC2
+    movlw Matrix + 8
+    subwf FSR2L,W
+    bnz   matclr
     return
       
-          
-    
-
-    
-
-
-
-
-
-
-;***************************************************************************************
-;   
-eeread  bcf   EECON1,EEPGD  ;read a EEPROM byte, EEADR must be set before this sub.
-    bcf   EECON1,CFGS
-    bsf   EECON1,RD
-    movf  EEDATA,W
-    return
-
-;**************************************************************************
-eewrite movwf EEDATA      ;write to EEPROM, EEADR must be set before this sub.
-    bcf   EECON1,EEPGD
-    bcf   EECON1,CFGS
-    bsf   EECON1,WREN
-    
-    clrf  INTCON  ;disable interrupts
-    movlw 0x55
-    movwf EECON2
-    movlw 0xAA
-    movwf EECON2
-    bsf   EECON1,WR
-eetest  btfsc EECON1,WR
-    bra   eetest
-    bcf   PIR2,EEIF
-    bcf   EECON1,WREN
-    movlw B'11000000'
-    movwf INTCON    ;reenable interrupts
-    
-    return  
-    
 ;***************************************************************
 enum  clrf  Tx1con      ;CAN ID enumeration. Send RTR frame, start timer
-      clrf  Enum0
+    clrf  Enum0
     clrf  Enum1
     clrf  Enum2
     clrf  Enum3
@@ -2383,8 +3000,6 @@ enum  clrf  Tx1con      ;CAN ID enumeration. Send RTR frame, start timer
     clrf  Enum12
     clrf  Enum13
 
-
-    
     movlw B'10111111'   ;fixed node, default ID  
     movwf Tx1sidh
     movlw B'11100000'
@@ -2442,10 +3057,16 @@ tx1done movlb 0       ;bank 0
 ;   the CAN-ID is pre-loaded in the Tx1 buffer 
 ;   Dlc must be loaded by calling source to the data length value
     
-sendTX  movff NN_temph,Tx1d1
+sendTX
+    movff NN_temph,Tx1d1
     movff NN_templ,Tx1d2
 
-sendTXa movf  Dlc,W       ;get data length
+sendTXa
+#ifdef  TESTMODE
+    tstfsz  Testmode
+    return
+#endif
+    movf  Dlc,W       ;get data length
     movwf Tx1dlc
     movlw B'00001111'   ;clear old priority
     andwf Tx1sidh,F
@@ -2534,260 +3155,43 @@ new_1f  btfsc TXB2CON,TXREQ
     movlb 0
     btfsc Datmode,3   ;already set up?
     return
-
-
-;*************************************************************************************
-;
-;   EN match. Compares EN (in Rx0d1, Rx0d2, Rx0d3 and Rx0d4) with stored ENs
-;   If match, returns with W = 0
-;   The matching number is in ENcount. The corresponding EV is in EVtemp 
-;
-enmatch clrf  TBLPTRL
-    movlw 0x39
-    movwf TBLPTRH   ;start of ENs in Flash
-    movlw LOW ENindex+1 ;
-    movwf EEADR
-    bcf   EECON1,EEPGD
-    bcf   EECON1,CFGS
-    bsf   EECON1,RD
-    movff EEDATA,Count
-    movf  Count,F
-  
-    bz    en_out    ;if no events set, do nothing
-    clrf  ENcount
-  
     
-ennext  clrf  Match
-    tblrd*+
-    movf  TABLAT,W
-    cpfseq  Rx0d1
-    incf  Match
-    tblrd*+
-    movf  TABLAT,W
-    cpfseq  Rx0d2
-    incf  Match
-    tblrd*+
-    movf  TABLAT,W
-    cpfseq  Rx0d3
-    incf  Match
-    tblrd*+
-    movf  TABLAT,W
-    cpfseq  Rx0d4
-    incf  Match
-    tstfsz  Match
-    bra   en_match
-    movf  ENcount,W   ;get EVs
-    addlw LOW EVstart   
-    movwf EEADR
-    
-    bsf   EECON1,RD
-    movff EEDATA,EVtemp ;EV
-    
-    
-    retlw 0     ;is a match
-en_match  
-    movf  Count,F
-    bz    en_out
-    decf  Count,F
-    incf  ENcount,F
-    bra   ennext
-en_out  retlw 1   
-      
 ;**************************************************************************
-
-getop movf  PORTA,W     ;get switch
+; SLim mode only, returns the LED bit in EVdata and the index in EVidx
+; EVtemp contains the switch data, bit 6 is the POL bit, bit 7 is unused
+;
+getop     ; read switches
+#ifdef  TESTMODE
+    tstfsz  Testmode
+    bra   getopx
+#endif
+    movf  PORTA,W   ;get switch
+    
+getopx      ; test entry, switch data in w
     andlw B'00111111'   ;mask
     movwf EVtemp
-    bcf   EVtemp,6    ;allows for a clear of pol.
-    btfss PORTC,POL     ;pol bit
+    movlw B'00000111'
+    andwf EVtemp,W
+    movwf EVidx     ; temp location
+    movlw 1
+    movwf EVdata      ;rolling bit
+movbit  movf  EVidx,F     ;is it zero
+    bz    gotbit
+    rlncf EVdata,F    ;roll bit
+    decf  EVidx,F
+    bra   movbit
+gotbit  movlw B'00111000'
+    andwf EVtemp,W
+    movwf EVidx
+    rrncf EVidx,F
+    rrncf EVidx,F
+    rrncf EVidx,F     ; index of EVdata in event data
+    btfss PORTC,POL   ; pol bit
     bsf   EVtemp,6
-    bcf   EVtemp,7
-    btfss PORTC,TOG   ;mode bit
-    bsf   EVtemp,7
     return
-    
-
-
-
-
-;   learn input of EN
-
-learnin btfsc Mode,1          ; Flim mode?
-    bra   lrnin1
-    btfss PORTC,UNLEARN     ;don't do if unlearn
-    return
-lrnin1  movlw LOW ENindex+1
-    movwf EEADR
-    bsf   EECON1,RD
-    movff EEDATA,ENcount      ;hold pointer
-    movlw EN_NUM
-    cpfslt  ENcount
-    retlw 1           ;too many
-
-  
-nopage  clrf  ENtemph       ;work out FLASH address for new EN
-    movff ENcount,ENtempl
-    rlncf ENtempl,F     ;double it
-    bcf   STATUS,C
-    rlcf  ENtempl,F     ;double it
-    rlcf  ENtemph,F     ;if carry from ENtempl
-    call  fladd       ;add to FLASH
-
-    movlw LOW ENindex+1
-    movwf EEADR
-    bsf   EECON1,RD
-    movf  EEDATA,W
-    addlw 1         ;increment for next
-    call  eewrite       ;put back
-    retlw 0
-    
-
-    
-
-
-
-      
-;************************************************************************************
-;
-;   FLASH add 
-;   Add a 4 byte EN to end of FLASH. Assumes blank
-;   ENtemph and ENtempl hold the offset for the start of the 4 bytes
-
-fladd movf  ENtempl,W
-    movwf TBLPTRL
-    movf  ENtemph,W
-    addlw 0x39      ;FLASH buffer starts at 0x3900
-    movwf TBLPTRH
-    btfsc ENtempl,2   ;which 4 of 8
-    bra   fladd2
-fladd1  movf  Rx0d1,W
-    movwf TABLAT  ;1st four
-    TBLWT*+
-    movf  Rx0d2,W
-    movwf TABLAT    
-    TBLWT*+
-    movf  Rx0d3,W
-    movwf TABLAT    
-    TBLWT*+
-    movf  Rx0d4,W
-    movwf TABLAT    
-    TBLWT*+
-    movlw 0xFF
-    movwf TABLAT
-    TBLWT*+
-    movlw 0xFF
-    movwf TABLAT
-    TBLWT*+
-    movlw 0xFF
-    movwf TABLAT
-    TBLWT*+
-    movlw 0xFF
-    movwf TABLAT
-    TBLWT*
-    
-    bra   fladd3
-fladd2  movlw 4
-    subwf TBLPTRL,F     ;back 4
-    tblrd*            ;read first 4 bytes of the 8
-    tblwt*+ 
-    tblrd*            ;put back in
-    tblwt*+
-    tblrd*
-    tblwt*+         
-    tblrd*
-    tblwt*+
-    movf  Rx0d1,W
-    movwf TABLAT    ;2nd four is EN
-    tblwt*+
-    movf  Rx0d2,W
-    movwf TABLAT    
-    tblwt*+
-    movf  Rx0d3,W
-    movwf TABLAT    
-    tblwt*+
-    movf  Rx0d4,W
-    movwf TABLAT
-    tblwt*
-    
-fladd3  bsf   EECON1, EEPGD
-    bcf   EECON1,CFGS
-    bcf   EECON1,FREE     ;no erase
-    bsf   EECON1, WREN
-    bsf   PORTC,2       ;LEDs off
-    clrf  INTCON
-    movlw 0x55
-    movwf EECON2
-    movlw 0xAA
-    movwf EECON2
-    bsf   EECON1,WR
-    nop
-    movlw B'11000000'
-    movwf INTCON
-    bcf   PORTC,2       ;LEDs on
-    return
-    
-;*******************************************************************
-;
-;   Flash clear
-
-clrflsh movlw .16     ;16 blocks of 64
-    movwf Count
-    movlw 0
-    movlw LOW TBLPTRL
-    movlw 0x39    ;start at 3900
-    movwf TBLPTRH
-    clrf  TBLPTRU
-clr1  bsf   EECON1,EEPGD    ;set up for erase
-    bcf   EECON1,CFGS
-    bsf   EECON1,WREN
-    bsf   EECON1,FREE
-    movlw 0x55
-    movwf EECON2
-    movlw 0xAA
-    movwf EECON2
-    bsf   EECON1,WR     ;erase
-    nop
-    nop
-    nop
-    decfsz  Count
-    bra   nxtclr
-    return
-    
-nxtclr  movlw .64
-    addwf TBLPTRL,F
-    movlw 0
-    addwfc  TBLPTRH
-    bra   clr1
     
 ;*********************************************************************
-
-;   clear all EEPROM
-
-clrepr  movlw .250      ;clear all 250 bytes
-    movwf Count
-    clrf  EEDATA
-    movlw LOW ENindex
-    movwf EEADR 
-    bcf   EECON1,EEPGD
-    bcf   EECON1,CFGS
-    bsf   EECON1,WREN
-clrnxt  movlw 0x55
-    movwf EECON2
-    movlw 0xAA
-    movwf EECON2
-    bsf   EECON1,WR
-clrtst  btfsc EECON1,WR
-    bra   clrtst
-    movf  Count,F
-    bz    clrdone
-    decf  Count,F
-    incf  EEADR
-    bra   clrnxt
-clrdone bcf   PIR2,EEIF
-    bcf   EECON1,WREN
-    return
-    
-;***********************************************************************      
+  
 ;   a delay routine
       
 dely  movlw .10
@@ -2815,50 +3219,51 @@ ldely1  call  dely
 ;   read back all events in sequence
 
 enread  clrf  Temp
-    movlw LOW ENindex + 1
+    movlw LOW ENCount
     movwf EEADR
     call  eeread
-    movwf ENtemp1
+    sublw 0
     bz    noens   ;no events set
     
-    clrf  TBLPTRL
-    movlw 0x39
-    movwf TBLPTRH
-    bsf   EECON1, EEPGD
-    bcf   EECON1, CFGS
+    clrf  Tx1d7   ; first event
+    movlw .64     ; hash table size
+    movwf ENcount 
+    movlw LOW hashtab
+    movwf EEADR
+nxtht
+    call  eeread
+    movwf evaddrh
+    incf  EEADR
+    call  eeread
+    movwf evaddrl
+nxten
+    tstfsz  evaddrh   ; check for valid entry
+    bra   evaddrok
+nxthtab
+    decf  ENcount
+    bz    lasten
+    incf  EEADR
+    bra   nxtht
     
-    movlw 1
-    movwf Tx1d7   ;first event
-  
-enloop1 
-    tblrd*+
-    movf  TABLAT, w
-    movwf Tx1d3
-    tblrd*+
-    movf  TABLAT, w
-    movwf Tx1d4
-    tblrd*+
-    movf  TABLAT, w
-    movwf Tx1d5
-    tblrd*+
-    movf  TABLAT, w
-    movwf Tx1d6
+evaddrok          ; ht address is valid
+    call  rdfbev8   ; read 8 bytes from event info
+    incf  Tx1d7
+    movff evt00, Tx1d3
+    movff evt01, Tx1d4
+    movff evt02, Tx1d5
+    movff evt03, Tx1d6
     
-    
-ensend  movlw 0xF2
-    movwf Tx1d0   ;OPC
+    movlw 0xF2
+    movwf Tx1d0
     movlw 8
     movwf Dlc
-    call  sendTX      ;send event back
+    call  sendTX
     call  dely
-    movf  Tx1d7,F
-    bz    lasten
-    incf  Temp,F
-    movf  ENtemp1,W
-    subwf Temp,W
-    bz    lasten
-    incf  Tx1d7
-    bra   enloop1     ;next one
+    
+    movff next0h, evaddrh
+    movff next0l, evaddrl
+    bra   nxten
+
 noens clrf  Rx0d3
     bra   noens1
   
@@ -2866,40 +3271,86 @@ noens clrf  Rx0d3
 lasten  return  
 
 ;*************************************************************************
+;
+; findEN - finds the event by its index
+
+findEN          ; ENidx must be valid and in range
+    clrf  hnum
+    clrf  ENcount
+    clrf  ENcount1
+findloop
+    movf  hnum,w
+    addlw LOW hashnum
+    movwf EEADR
+    call  eeread
+    addlw 0
+    bz    nxtfnd
+    addwf ENcount1
+    movf  ENcount1,w
+    cpfslt  ENidx   ;skip if ENidx < ENcount1
+    bra   nxtfnd
+    bra   htfound
+nxtfnd
+    movff ENcount1, ENcount
+    incf  hnum
+    bra   findloop
+htfound
+    rlncf hnum,w
+    addlw LOW hashtab
+    movwf EEADR
+    call  eeread
+    movwf evaddrh
+    incf  EEADR
+    call  eeread
+    movwf evaddrl
+nxtEN
+    movf  ENidx,w
+    cpfslt  ENcount
+    return
+    
+nxtEN1
+    incf  ENcount
+    call  rdfbev8
+    movff next0h, evaddrh
+    movff next0l, evaddrl
+    bra   nxtEN
+    
+;*************************************************************************
 
 ; send individual event by index
 
-enrdi movlw LOW ENindex + 1
+enrdi movlw LOW ENCount ; no of events set
     movwf EEADR
     call  eeread
     movwf ENtemp1
     bz    noens1    ;no events set
-    movf  Rx0d3,W 
-    decf  WREG
-    cpfsgt  ENtemp1
-    bra   noens1    ;too many
-    rlncf WREG
-    rlncf WREG
-    addlw LOW ENstart
+    
+    movf  ENidx,w   ; index starts at 1
+    bz    noens1
+    
+    decf  ENidx   ; make zero based for lookup
+    movlw LOW ENCount
     movwf EEADR
-    call  eeread
-    movwf Tx1d3
-    incf  EEADR
-    call  eeread
-    movwf Tx1d4
-    incf  EEADR
-    call  eeread
-    movwf Tx1d5
-    incf  EEADR
-    call  eeread
-    movwf Tx1d6
-enrdi1  movff Rx0d3,Tx1d7
+    call  eeread    ; read no of events
+    cpfslt  ENidx   ; required index is in range
+    bra   noens1
+    
+    call  findEN
+    call  rdfbev8   ; get event data
+    
+    movff evt00, Tx1d3
+    movff evt01, Tx1d4
+    movff evt02, Tx1d5
+    movff evt03, Tx1d6
+    incf  ENidx
+    movff ENidx, Tx1d7
     movlw 0xF2
     movwf Tx1d0
     movlw 8
     movwf Dlc
     call  sendTX
     return
+    
 noens1  movlw 7       ;no events set
     call  errsub
     return
@@ -2908,7 +3359,7 @@ noens1  movlw 7       ;no events set
     
 ;   send number of events
 
-evns2 movlw LOW ENindex+1
+evns2 movlw LOW ENCount
     movwf EEADR
     call  eeread
     movwf Tx1d3
@@ -2923,39 +3374,36 @@ evns2 movlw LOW ENindex+1
 
 ;   send EVs by reference to EN index
 
-evsend  movf  Rx0d3,W   ;get event index
-    bz    notEN   ;can,t be zero
-    decf  WREG
-    movwf Temp
-    movlw LOW ENindex+1 ;get number of stored events
+evsend
+    movf  ENidx,w   ; index starts at 1
+    bz    notEN
+    decf  ENidx
+    movf  EVidx,w   ; index starts at 1
+    bz    notEN
+    decf  EVidx
+    movlw LOW ENCount
     movwf EEADR
-    call  eeread
-    cpfslt  Temp
-    bra   notEN   ;too many events in index
+    call  eeread    ; read no of events
+    cpfslt  ENidx
+    bra   notEN
     
-    movf  Temp,W
-    mullw EV_NUM    ;PRODL has start of EVs
-    movf  Rx0d4,W   ;get EV index
-    bz    notEN   ;
-    decf  WREG
-    movwf Temp1
-    movlw EV_NUM
-    cpfslt  Temp1
-    bra   notEN   ;too many EVs in index
-    movf  Temp1,W
-    addwf PRODL,W   ;get EV adress
-    addlw LOW EVstart
-    movwf EEADR
-    call  eeread
-    movwf Tx1d5   ;put in EV value
+    call  findEN
+    
+    call  rdfbev24  ; read event data
+    lfsr  FSR0,led00
+    movf  EVidx,w
+    movff PLUSW0, Tx1d5
+    incf  EVidx   ; make 1 based again...
+    incf  ENidx   ; ... ditto
     movlw 0xB5
     movwf Tx1d0
-    movff Rx0d3,Tx1d3
-    movff Rx0d4,Tx1d4
+    movff ENidx,Tx1d3
+    movff EVidx,Tx1d4
     movlw 6
     movwf Dlc
-    call  sendTX  
+    call  sendTX
     return
+
 notEN movlw 8   ;invalid EN#
     call  errsub
     return
@@ -3019,7 +3467,12 @@ errmsg1 call  errsub
 errmsg2 call  errsub
     goto  l_out1
 
-errsub  movwf Tx1d3   ;main eror message send. Error no. in WREG
+errsub
+#ifdef  TESTMODE
+    tstfsz  Testmode  ; do nothing in test mode
+    return
+#endif
+    movwf Tx1d3   ;main eror message send. Error no. in WREG
     movlw 0x6F
     movwf Tx1d0
     movlw 4
@@ -3063,13 +3516,12 @@ segful    movlw 7   ;segment full, no CAN_ID allocated
       setf  IDcount
       bcf   IDcount,7
       return  
+      
+ENstart   ;dummy label
     
-;*************************************************************
-
-    ORG 0x3900
-    
-ENstart       ;start of events in FLASH program memory
-
+; event data
+  org 0x2000
+evdata
 
 ;************************************************************************   
   ORG 0xF00000      ;EEPROM data. Defaults
@@ -3077,42 +3529,32 @@ ENstart       ;start of events in FLASH program memory
 
 CANid de  B'01111111',0 ;CAN id default and module status
 NodeID  de  0,0     ;Node ID    
-ENindex de  0,0x00  ;points to next available EN number (only hi byte used)
 
-EVstart de  0,0   ;allows 248 possible EVs, one per event
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
-    de  0,0
+ENCount de  0,0xff  ; no of events in event data/free space
+FreeCh  de  0,0   ; address of first free entry
+
+; event hash table, indexed by ls 6 bits of ls byte of event node num.
+; table contains address of event data in High/Low pairs if present else zero
+
+  org 0xf00010
+hashtab de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0    
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    
+; number of events in each hash table entry
+hashnum de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0    
+    de 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
     
     ORG 0xF000FE
 NVstart de  0,0     ;for bootloader and NV
-    
-    end
+
+  end
+
+
