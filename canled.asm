@@ -1,5 +1,5 @@
     TITLE   "Source for CAN multiplexed LED driver using CBUS"
-; filename LED2_k.asm  15/02/10
+; filename LED2_n.asm  29/01/11
 ; a LED driver for 64 LEDs intended for control panels. Consumer node for SLiM/FLim with bootloader 
 
 
@@ -56,6 +56,8 @@
 ; prevent error messages in unset Rev h.  (17/03/10
 ; Rev j. Has new enum scheme. 24/03/10
 ; Rev k. Added clear of RXB overflow bits in COMSTAT
+; Rev m  (no Rev l)  minor bug fixes in reset sequence 29/01/11
+; Rev n.  Removed request events  (10/02/11)
 
 ; This is the bootloader section
 
@@ -146,25 +148,25 @@ LED2  equ   6 ;PB6 is the yellow LED on the PCB
 
 CMD_ON    equ 0x90  ;on event
 CMD_OFF   equ 0x91  ;off event
-CMD_REQ   equ 0x92
+
 SCMD_ON   equ 0x98  ;short on event
 SCMD_OFF  equ 0x99  ;short off event
-SCMD_REQ  equ 0x9A
+
 EN_NUM  equ .248  ;number of allowed events
 
-EV_NUM  equ 1   ;number of allowed EVs per event
+EV_NUM  equ   1   ;number of allowed EVs per event
 NV_NUM  equ 1   ;number of allowed NVs for node (provisional)
-LED2_ID equ 6
+LED2_ID equ   6
 
 Modstat equ 1   ;address in EEPROM
 
 ;module parameters  change as required
 
 Para1 equ .165  ;manufacturer number
-Para2 equ  "K"  ;for now
+Para2 equ  "N"  ;for now
 Para3 equ LED2_ID
-Para4 equ EN_NUM    ;node descriptors (temp values)
-Para5 equ EV_NUM
+Para4 equ   EN_NUM    ;node descriptors (temp values)
+Para5 equ   EV_NUM
 Para6 equ 0
 Para7 equ 0
 
@@ -1549,24 +1551,20 @@ params  btfss Datmode,2   ;only in setup mode
   
                 ;main packet handling is here
 
-packet  movlw CMD_ON  ;only ON, OFF and REQ events supported
+packet  movlw CMD_ON     ;only ON, OFF  events supported
     subwf Rx0d0,W 
     bz    go_on_x
     movlw CMD_OFF
     subwf Rx0d0,W
     bz    go_on_x
-    movlw CMD_REQ
-    subwf Rx0d0,W
-    bz    go_on_x
+    
     movlw SCMD_ON
     subwf Rx0d0,W
     bz  short
     movlw SCMD_OFF
     subwf Rx0d0,W
     bz  short
-    movlw SCMD_REQ
-    subwf Rx0d0,W
-    bz  short
+  
     movlw 0x5C      ;reboot
     subwf Rx0d0,W
     bz    reboot
@@ -2126,10 +2124,12 @@ setup clrf  INTCON      ;no interrupts yet
     movlw B'00100100'
     movwf RXB0CON     ;enable double buffer of RX0
     movlb .15
-    movlw B'00100000'   ;reject extended frames
-    movwf RXB1CON
-    clrf  RXF0SIDL
-    clrf  RXF1SIDL
+    bcf   RXF1SIDL,3    ;standard frames
+    bcf   RXF0SIDL,3    ;standard frames
+    bcf   RXB0CON,RXM1  ;frame type set by RXFnSIDL
+    bcf   RXB0CON,RXM0
+    bcf   RXB1CON,RXM1
+    bcf   RXB1CON,RXM0
     movlb 0
     
 mskload lfsr  FSR0,RXM0SIDH   ;Clear masks, point to start
@@ -2156,7 +2156,8 @@ mskloop clrf  POSTINC0
     clrf  IPR1      ;all peripheral interrupts are low priority
     clrf  IPR2
     clrf  PIE2
-    
+    clrf  PIR1
+    clrf  PIR2
     
     
     
@@ -2203,13 +2204,13 @@ matclr  clrf  POSTINC2
     movwf Datmode
     sublw 0       ;not set yet
     bnz   setid
-    bra   slimset     ;wait for setup PB
+    bra   slimset   
 
 setid bsf   Mode,1      ;flag FLiM
     call  newid_f     ;put ID into Tx1buf, TXB2 and ID number store
 
 seten_f ;call en_ram      ;put events in RAM
-  
+    
     movlw B'11000000'
     movwf INTCON      ;enable interrupts
     bcf   LED_PORT,LED1
@@ -2232,7 +2233,13 @@ seten ;call en_ram      ;put events in RAM
 
     goto  main
 
-setloop 
+setloop movlb .15
+    bcf RXB1CON,RXFUL
+    movlb 0
+    bcf RXB0CON,RXFUL   ;ready for next
+    bcf COMSTAT,RXB0OVFL  ;clear overflow flags if set
+    bcf COMSTAT,RXB1OVFL
+    clrf  PIR3      ;clear all flags
     movlw B'11000000'
     movwf INTCON      ;enable interrupts
     bsf   Datmode,1   ;setup mode
@@ -2429,8 +2436,10 @@ ldTX1 movf  POSTINC0,W
 tx1test btfsc TXB1CON,TXREQ ;test if clear to send
     bra   tx1test
     bsf   TXB1CON,TXREQ ;OK so send
+tx1done btfsc TXB1CON,TXREQ ;wait till sent
+    bra   tx1done
     
-tx1done movlb 0       ;bank 0
+    movlb 0       ;bank 0
     return          ;successful send
 
 
