@@ -1,5 +1,5 @@
     TITLE   "Source for CAN multiplexed LED driver using CBUS"
-; filename LED2_n.asm  29/01/11
+; filename LED2_r.asm  12/03/11
 ; a LED driver for 64 LEDs intended for control panels. Consumer node for SLiM/FLim with bootloader 
 
 
@@ -58,6 +58,11 @@
 ; Rev k. Added clear of RXB overflow bits in COMSTAT
 ; Rev m  (no Rev l)  minor bug fixes in reset sequence 29/01/11
 ; Rev n.  Removed request events  (10/02/11)
+; rev p 07/03/11 Boot command now only works with NN of zero
+;   Read parameters by index works in SLiM mode with NN of zero
+; rev q 12/03/11 Add WRACK write acknowldge
+;   fix bug in 0x55 - delete all events, not setting num events to zero
+; rev r 15/03/11 clear NN_temph and NN_templ in slimset
 
 ; This is the bootloader section
 
@@ -163,7 +168,7 @@ Modstat equ 1   ;address in EEPROM
 ;module parameters  change as required
 
 Para1 equ .165  ;manufacturer number
-Para2 equ  "N"  ;for now
+Para2 equ  "R"  ;for now
 Para3 equ LED2_ID
 Para4 equ   EN_NUM    ;node descriptors (temp values)
 Para5 equ   EV_NUM
@@ -1536,38 +1541,39 @@ notNNx  goto  notNN
 
 go_on_x goto  go_on
 
+paran goto  para1a
+
 params  btfss Datmode,2   ;only in setup mode
     bra   main2
     call  parasend
     bra   main2
     
-
-
-
-    
+readEN  call  thisNN
+    sublw 0
+    bnz   notNNx
+    call  enread
+    bra   main2
   
-    
-  
-  
-                ;main packet handling is here
+    ;main packet handling is here
 
 packet  movlw CMD_ON     ;only ON, OFF  events supported
     subwf Rx0d0,W 
     bz    go_on_x
     movlw CMD_OFF
     subwf Rx0d0,W
-    bz    go_on_x
-    
+    bz    go_on_x   
     movlw SCMD_ON
     subwf Rx0d0,W
-    bz  short
+    bz    short
     movlw SCMD_OFF
     subwf Rx0d0,W
-    bz  short
-  
+    bz    short 
     movlw 0x5C      ;reboot
     subwf Rx0d0,W
     bz    reboot
+    movlw 0x73
+    subwf Rx0d0,W
+    bz    paran     ;read individual parameters
     btfss Mode,1      ;FLiM?
     bra   main2
     movlw 0x42      ;set NN on 0x42
@@ -1605,9 +1611,6 @@ packet  movlw CMD_ON     ;only ON, OFF  events supported
     movlw 0x72
     subwf Rx0d0,W
     bz    readENi     ;read event by index
-    movlw 0x73
-    subwf Rx0d0,W
-    bz    para1a      ;read individual parameters
     movlw 0x58
     subwf Rx0d0,W
     bz    evns
@@ -1620,7 +1623,7 @@ evns  goto  evns1
     bra   main2
 
 reboot  btfss Mode,1
-    bra   reboot1
+    bra   reboots
     call  thisNN
     sublw 0
     bnz   notNN
@@ -1629,7 +1632,16 @@ reboot1 movlw 0xFF
     movlw 0xFF
     call  eewrite     ;set last EEPROM byte to 0xFF
     reset         ;software reset to bootloader
+    
+reboots movf  Rx0d1,w   ;Slim mode check NN is zero
+    addwf Rx0d2,w
+    bz    reboot1
+    bra   notNN
 
+short clrf  Rx0d1
+    clrf  Rx0d2
+    bra   go_on 
+    
 chklrn  btfss Datmode,4
     bra   main2 
     bra   learn1
@@ -1678,26 +1690,22 @@ notln1    ;leave in learn mode
     bcf   Datmode,5
 ;   bcf   LED_PORT,LED2
     bra   main2
+    
 clrens  call  thisNN
     sublw 0
     bnz   notNN
     btfss Datmode,4
     bra   clrerr
     call  clrflsh
+    call  sendWrack
     bra   notln1
+    
 notNN bra   main2
 clrerr  movlw 2     ;not in learn mode
     goto  errmsg
 
-    
 
     
-
-short clrf  Rx0d1
-    clrf  Rx0d2
-    bra   go_on 
-    
-
     
 go_on btfss Mode,1      ;FLiM?
     bra   go_on_s
@@ -1725,17 +1733,21 @@ readENi call  thisNN      ;read event by index
 paraerr movlw 3       ;error not in setup mode
     goto  errmsg
 
-para1a  call  thisNN      ;read parameter by index
+para1a  btfsc Mode, 1     ; Flim mode?
+    bra   para1f
+    movf  Rx0d1, w    ; Slim mode, check NN is zero
+    addwf Rx0d2, w
+    bnz   notNN
+    call  para1rd
+    bra   main2
+    
+para1f  call  thisNN      ;read parameter by index
     sublw 0
     bnz   notNN
     call  para1rd
     bra   main2
 
-readEN  call  thisNN
-    sublw 0
-    bnz   notNN
-    call  enread
-    bra   main2
+
     
 do_it 
     call  ev_set      ;do it (not yet)
@@ -1791,11 +1803,12 @@ learn3  btfsc Datmode,6   ;read EV?
     btfsc Datmode,5   ;if unset and not here
     bra   l_out1      ;do nothing else 
 learn4  call  learnin     ;put EN into stack and RAM
-    sublw 0
+    sublw 0 
     bz    new_EV
     movlw 4
     goto  errmsg2     
     bra   l_out1      ;too many
+    
 isthere btfsc Mode,1
     bra   isth1     ;skip looking at switch
     btfss PORTC,UNLEARN ;is it here and unlearn,goto unlearn
@@ -1888,6 +1901,7 @@ mod_EVf movff Rx0d5,EVtemp  ;store EV index
     bra   rdbak
     movf  EVtemp2,W
     call  eewrite       ;put in
+    call  sendWrack
     bra   l_out2
 
 
@@ -1902,7 +1916,8 @@ l_out2  bcf   Datmode,0
     clrf  PCLATH
     goto  main2
     
-noEV  movlw 6       ;invalid EV#
+noEV  call  sendWrack
+    movlw 6       ;invalid EV#
     goto  errmsg2
 
 
@@ -2064,6 +2079,7 @@ evshift call  eeread
     movlw B'11000000'
     movwf INTCON        ;reenable interrupts
     bcf   PORTC,2       ;LEDs on
+    call  sendWrack
     bra   l_out
 
 do    btfss Mode,1      ;in FLiM?
@@ -2139,7 +2155,6 @@ mskloop clrf  POSTINC0
     bra   mskloop
     
     
-  
     clrf  CANCON      ;out of CAN setup mode
     clrf  CCP1CON
     movlw B'10000001'   ;Timer 1 control.16 bit write
@@ -2158,10 +2173,6 @@ mskloop clrf  POSTINC0
     clrf  PIE2
     clrf  PIR1
     clrf  PIR2
-    
-    
-    
-    
     
     
     lfsr  FSR2,Matrix   ;clear LED matrix
@@ -2219,6 +2230,8 @@ seten_f ;call en_ram      ;put events in RAM
     goto  main
 
 slimset bcf   Mode,1
+    clrf  NN_temph    ; set NN to zero
+    clrf  NN_templ
     ;test for clear all events
     btfss PORTC,LEARN   ;ignore the clear if learn is set
     goto  seten
@@ -2334,16 +2347,6 @@ off1  movf  INDF2,W
     movwf INDF2
     return
       
-          
-    
-
-    
-
-
-
-
-
-
 ;***************************************************************************************
 ;   
 eeread  bcf   EECON1,EEPGD  ;read a EEPROM byte, EEADR must be set before this sub.
@@ -2760,6 +2763,11 @@ clr1  bsf   EECON1,EEPGD    ;set up for erase
     nop
     decfsz  Count
     bra   nxtclr
+    ;clear event count in eeprom
+    movlw LOW ENindex+1
+    movwf EEADR
+    movlw 0
+    call  eewrite 
     return
     
 nxtclr  movlw .64
@@ -3016,6 +3024,20 @@ para1rd movlw 0x9B
     movwf Dlc
     call  sendTX
     return  
+    
+;***********************************************************
+;
+; send WRACK - write acknowledge
+
+sendWrack
+    btfss Mode,1
+    return      ; not in SLiM mode
+    movlw 0x59  ; WRACK OPC
+    movwf Tx1d0
+    movlw 3
+    movwf Dlc
+    call  sendTX
+    return
 
 ;***********************************************************
 
